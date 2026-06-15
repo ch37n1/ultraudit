@@ -11,7 +11,9 @@ Workflow:
 Documents:
 
 - [Vision](vision.md)
+- [Prompt/Practice Pack v0.2 Plan](prompt-pack-v0.2-plan.md)
 
 Source drafts:
 
 - [Vision RU](../ru/vision.md)
+- [Prompt/Practice Pack v0.2 Plan RU](../ru/prompt-pack-v0.2-plan.md)
