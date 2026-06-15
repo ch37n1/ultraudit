@@ -27,7 +27,7 @@ Ultraudit - консольная утилита для глубокого аге
 
 - Не пытаться заменить статические анализаторы, dependency scanners и тестовые раннеры. Их можно подключать позже как источники evidence.
 - Не требовать от агента скрытый chain-of-thought. Утилита сохраняет только то, что агент явно выдает в stdout/stderr и в артефактах.
-- Не делать web UI в первой версии. CLI и файловая структура достаточно хороши для MVP.
+- Не делать web UI в первой версии. CLI и файловая структура достаточно хороши для первой версии.
 - Не обещать полностью автоматическую правку prompts/practices без approval. Эволюция правил должна быть контролируемой.
 
 ## Базовые принципы
@@ -57,6 +57,69 @@ Ultraudit - консольная утилита для глубокого аге
    Для известных агентов Ultraudit должен хранить typed config и собирать процессный вызов внутри кода. Это снижает риск ошибок quoting, command injection, проблем с пробелами в путях и утечек prompt'ов через аргументы процесса. Raw shell command допустим как escape hatch для `CustomShellRunner`.
 
 ## Review Flow
+
+```mermaid
+flowchart TD
+    run["Audit run"]
+    intake["1. Repository intake<br/>repository.md / repository.yaml / run.yaml"]
+    domain_map["2. Domain decomposition<br/>domain-map.md / domain-map.yaml"]
+
+    run --> intake --> domain_map
+
+    domain_map --> domain_a["Domain A"]
+    domain_map --> domain_b["Domain B"]
+    domain_map --> domain_n["Domain N"]
+
+    domain_a --> a_arch["Architecture lens"]
+    domain_a --> a_sec["Security lens"]
+    domain_a --> a_test["Testing lens"]
+    domain_a --> a_more["Other selected lenses"]
+
+    domain_b --> b_arch["Architecture lens"]
+    domain_b --> b_sec["Security lens"]
+    domain_b --> b_test["Testing lens"]
+    domain_b --> b_more["Other selected lenses"]
+
+    domain_n --> n_arch["Architecture lens"]
+    domain_n --> n_sec["Security lens"]
+    domain_n --> n_test["Testing lens"]
+    domain_n --> n_more["Other selected lenses"]
+
+    a_arch --> domain_synth_a["Domain A synthesis"]
+    a_sec --> domain_synth_a
+    a_test --> domain_synth_a
+    a_more --> domain_synth_a
+
+    b_arch --> domain_synth_b["Domain B synthesis"]
+    b_sec --> domain_synth_b
+    b_test --> domain_synth_b
+    b_more --> domain_synth_b
+
+    n_arch --> domain_synth_n["Domain N synthesis"]
+    n_sec --> domain_synth_n
+    n_test --> domain_synth_n
+    n_more --> domain_synth_n
+
+    domain_map --> cross["Cross-domain review"]
+    domain_synth_a --> system["System synthesis"]
+    domain_synth_b --> system
+    domain_synth_n --> system
+    cross --> system
+
+    system --> previous["Previous runs comparison"]
+    previous --> final["Final editorial / verification pass"]
+    final --> report["Final report"]
+
+    intake -. "artifacts" .-> artifacts["Run artifact tree"]
+    domain_map -. "artifacts" .-> artifacts
+    domain_synth_a -. "artifacts" .-> artifacts
+    domain_synth_b -. "artifacts" .-> artifacts
+    domain_synth_n -. "artifacts" .-> artifacts
+    cross -. "artifacts" .-> artifacts
+    system -. "artifacts" .-> artifacts
+    previous -. "artifacts" .-> artifacts
+    final -. "artifacts" .-> artifacts
+```
 
 ### 1. Repository Intake
 
@@ -173,7 +236,7 @@ Ultraudit - консольная утилита для глубокого аге
 
 ## Review Lenses
 
-### MVP / Default Lenses
+### Initial / Default Lenses
 
 1. **Architecture**  
    Boundaries, ownership, coupling, dependency direction, module structure, extensibility.
@@ -414,65 +477,119 @@ Ultraudit должен сохранять видимый процессный ou
 
 ## Внешний слой prompts/practices
 
-Prompts и practices должны жить вне бинарника:
+Prompts и practices должны жить вне бинарника и не должны быть привязаны к одному проекту. Базовое место хранения - пользовательская системная директория `~/.ultraudit`, чтобы один и тот же набор review knowledge можно было использовать между разными репозиториями.
+
+Project-local config может выбирать pack и версию, но не должен быть единственным местом хранения практик:
 
 ```text
+~/.ultraudit/
+  config.toml
+  packs/
+    ultraudit-default/
+      versions/
+        0.1.0/
+          pack.toml
+          prompts/
+            base-reviewer.md
+            domain-discovery.md
+            domain-synthesis.md
+            system-synthesis.md
+            previous-runs-comparison.md
+            final-editor.md
+          lenses/
+            architecture/
+              lens.toml
+              prompt.md
+              practices.md
+              evidence.md
+              false-positives.md
+            code-quality/
+              lens.toml
+              prompt.md
+              practices.md
+            security/
+              lens.toml
+              prompt.md
+              practices.md
+              evidence.md
+              false-positives.md
+            correctness/
+            testing/
+            reliability/
+            performance/
+            observability/
+            operations/
+            api-contracts/
+            data-integrity/
+            privacy-compliance/
+            dependency-supply-chain/
+            ux-product/
+            ml-ai/
+          overlays/
+            rust/
+              overlay.toml
+              practices.md
+              evidence.md
+              false-positives.md
+            python/
+            typescript/
+            html-css/
+            swift/
+            kotlin/
+            cli/
+            async-concurrent/
+            backend-api/
+            web-frontend/
+            mobile-apps/
+            desktop-apps/
+            database/
+            distributed-systems/
+            operations/
+            ml-ai/
+          optics/
+            documentation-knowledge/
+              optic.toml
+              prompt.md
+              practices.md
+          atoms/
+            rust-async-blocking.yaml
+          suggestions/
+            pending/
+        0.2.0/
+          pack.toml
+
 .audit/
   config.toml
   agents/
     codex.toml
     custom-shell.toml
-  prompts/
-    base-reviewer.md
-    domain-discovery.md
-    domain-synthesis.md
-    system-synthesis.md
-    previous-runs-comparison.md
-    final-editor.md
-  lenses/
-    architecture.md
-    code-quality.md
-    security.md
-    correctness.md
-    testing.md
-    reliability.md
-    performance.md
-    observability.md
-    operations.md
-    api-contracts.md
-    data-integrity.md
-    privacy-compliance.md
-    dependency-supply-chain.md
-    ux-product.md
-    ml-ai.md
-  practices/
-    general.md
-    rust.md
-    python.md
-    typescript.md
-    html-css.md
-    swift.md
-    kotlin.md
-    cli.md
-    async-concurrent.md
-    backend-api.md
-    web-frontend.md
-    mobile-apps.md
-    desktop-apps.md
-    database.md
-    distributed-systems.md
-    operations.md
-    ml-ai.md
-    optics/
-      documentation-knowledge.md
 ```
+
+Example project-local selection:
+
+```toml
+[prompt_pack]
+name = "ultraudit-default"
+version = "0.1.0"
+source = "~/.ultraudit/packs/ultraudit-default/versions/0.1.0"
+```
+
+Version directories are the switching boundary. A run must resolve exactly one pack version before review starts, record that version in the invocation manifest, and copy or checksum the resolved pack into the run artifacts. This makes old reports explainable even after practices evolve.
+
+Lens, overlay, and optic files have different responsibilities:
+
+- `lenses/` define the stable finding taxonomy and the risk perspective;
+- `overlays/` add stack-specific failure modes, evidence signals, and false-positive checks;
+- `optics/` define opt-in supplemental checks that are not part of the default/full pack until proven useful;
+- `prompts/` define reusable templates and task instructions;
+- `atoms/` may hold structured practice atoms for cases where machine-readable selection is useful.
 
 Self-evolving поведение должно быть контролируемым:
 
 1. агент предлагает изменения prompts/practices;
-2. Ultraudit сохраняет их в `suggestions/`;
+2. Ultraudit сохраняет их в `suggestions/` рядом с соответствующей версией pack;
 3. человек или явный approval flow принимает изменения;
-4. принятые изменения становятся частью следующей версии prompt pack.
+4. принятые изменения становятся частью следующей версии prompt pack, а не мутируют уже использованную версию.
 
 ## Абстракция Agent Runner
 
@@ -575,49 +692,62 @@ trait AgentRunner {
 - `uuid` и `chrono` для run IDs;
 - `anyhow` и `thiserror` для error handling.
 
-## MVP-план
+## План первой версии
 
-### Phase 1: Skeleton
+Первая версия не является временным throwaway-прототипом. Она должна быть рабочей основой Ultraudit: с реальным prompt/practice pack, воспроизводимым run flow, сохранением артефактов и понятной траекторией последующих улучшений.
+
+Research по review practices уже считается входом для реализации. Следующий шаг - материализовать результаты research в initial `~/.ultraudit` pack и построить утилиту вокруг этого pack.
+
+### Phase 1: Initial Prompt/Practice Pack
+
+- Создать первую структуру `~/.ultraudit/packs/ultraudit-default/versions/0.1.0`.
+- Перенести результаты research в initial lenses, overlays, optics и practice atoms.
+- Подготовить базовые prompts: reviewer, domain discovery, domain synthesis, system synthesis, previous-run comparison, final editor.
+- Описать `pack.toml`, schema version, supported lenses, overlays и default/full pack selection.
+- Зафиксировать source-backed assumptions, research gaps и refresh triggers.
+
+### Phase 2: CLI Orchestrator
 
 - CLI с командой `run`.
-- `.audit/config.toml`.
+- `.audit/config.toml` для project-local настроек и выбора prompt pack.
+- `~/.ultraudit` discovery и prompt pack resolution.
 - Codex CLI runner и `CodexInvocationBuilder`.
 - Создание run-директории.
-- Рендеринг prompts.
-- Сохранение raw stdout/stderr.
+- Рендеринг prompts из resolved pack.
+- Сохранение raw stdout/stderr и invocation manifest.
 
-### Phase 2: Domain Discovery
+### Phase 3: Domain Discovery
 
 - Repository intake.
 - Domain decomposition prompt.
 - `domain-map.md` and `domain-map.yaml`.
 - Базовая schema validation.
 
-### Phase 3: Lens Reviews
+### Phase 4: Lens Reviews
 
-- Default lens pack.
+- Default lens pack из resolved `~/.ultraudit` version directory.
 - Агентские запуски per-domain/per-lens.
 - Извлечение structured findings.
 - Raw process artifacts.
 
-### Phase 4: Synthesis
+### Phase 5: Synthesis
 
 - Domain synthesis.
 - Cross-domain review.
 - System synthesis.
 - Final editorial pass.
 
-### Phase 5: Historical Comparison
+### Phase 6: Historical Comparison
 
 - Сравнение текущего run с предыдущими runs.
 - Отслеживание repeated, missing, fixed и conflicting findings.
 - Включение previous-runs analysis в финальный отчет.
 
-### Phase 6: Prompt/Practice Evolution
+### Phase 7: Prompt/Practice Evolution
 
 - Сохранение improvement suggestions.
 - Явный approval flow.
-- Версионирование prompt packs.
+- Создание новой version directory для принятого prompt/practice pack.
 
 ## Слой исследованных практик
 
