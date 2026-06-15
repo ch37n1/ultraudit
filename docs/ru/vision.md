@@ -689,16 +689,31 @@ trait AgentRunner {
 
 ## Предлагаемый Rust-стек
 
-- `clap` для CLI;
+Консольную утилиту стоит строить вокруг `clap`, а не писать парсинг аргументов вручную. Первая реализация должна использовать derive API из `clap` для typed commands и flags, Cargo-backed `--version` metadata, сгенерированный help, примеры в long help, value-enum validation для packs/lenses/optics и `clap_complete` для shell completions.
+
+Начальные CLI-зависимости:
+
+- `clap` с features `derive`, `env` и `wrap_help` для commands, flags, typed values, environment fallbacks и форматированного help;
+- `clap_complete` для bash, zsh, fish, PowerShell и elvish completions;
+- `anstream` и `anstyle` для color-aware human output, который может учитывать возможности терминала и `NO_COLOR`;
+- `assert_cmd` и `predicates` для end-to-end CLI tests поверх собранного бинарника.
+
+Core implementation dependencies:
+
 - `tokio` для async orchestration и параллельных agent runs;
 - `serde`, `serde_yaml`, `serde_json`, `toml` для configs и artifacts;
 - `schemars` для schemas;
-- `tracing` для logs;
+- `tracing` и `tracing-subscriber` для logs;
 - `ignore` для обхода репозитория с учетом `.gitignore`;
 - `tokio::process` для agent execution без shell там, где это возможно;
 - `minijinja` для prompt templates;
 - `uuid` и `chrono` для run IDs;
 - `anyhow` и `thiserror` для error handling.
+
+Опциональные terminal UX dependencies можно добавлять, когда появятся соответствующие реальные features:
+
+- `indicatif` для progress bars и spinners вокруг долгих agent jobs;
+- `comfy-table` для читаемых terminal summaries по runs, domains и findings.
 
 ## План первой версии
 

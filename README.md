@@ -1,6 +1,18 @@
 # ultraudit
 Tool to audit applications
 
+## Implementation
+
+Ultraudit is now scaffolded as a Rust CLI crate. The first executable surface is intentionally narrow:
+
+```bash
+cargo run -- run --dry-run --pack full
+cargo run -- --format json run --dry-run --pack production
+cargo run -- completions zsh
+```
+
+CLI parsing, flags, help text, color-aware output, JSON output, shell completions, and integration-test scaffolding are in place. The actual audit orchestrator is the next implementation step.
+
 ## Documentation
 
 The repository language is English. Documentation is split by language:

@@ -689,16 +689,31 @@ Expected runners:
 
 ## Suggested Rust Stack
 
-- `clap` for CLI;
+The console utility should be built around `clap` rather than hand-written argument parsing. The first implementation should use `clap`'s derive API for typed commands and flags, Cargo-backed `--version` metadata, generated help, examples in long help, value-enum validation for packs/lenses/optics, and `clap_complete` for shell completions.
+
+Initial CLI-oriented dependencies:
+
+- `clap` with `derive`, `env`, and `wrap_help` features for commands, flags, typed values, environment fallbacks, and formatted help;
+- `clap_complete` for bash, zsh, fish, PowerShell, and elvish completions;
+- `anstream` and `anstyle` for color-aware human output that can respect terminal capabilities and `NO_COLOR`;
+- `assert_cmd` and `predicates` for end-to-end CLI tests against the compiled binary.
+
+Core implementation dependencies:
+
 - `tokio` for async orchestration and parallel agent runs;
-- `serde`, `serde_yaml`, `serde_json`, `toml` for configs and artifacts;
+- `serde`, `serde_yaml`, `serde_json`, and `toml` for configs and artifacts;
 - `schemars` for schemas;
-- `tracing` for logs;
+- `tracing` and `tracing-subscriber` for logs;
 - `ignore` for repository walking with `.gitignore` support;
 - `tokio::process` for agent execution without shell where possible;
 - `minijinja` for prompt templates;
 - `uuid` and `chrono` for run IDs;
 - `anyhow` and `thiserror` for error handling.
+
+Optional terminal UX dependencies can be added when the corresponding features become real:
+
+- `indicatif` for progress bars and spinners around long-running agent jobs;
+- `comfy-table` for readable terminal summaries of runs, domains, and findings.
 
 ## First-Version Plan
 
