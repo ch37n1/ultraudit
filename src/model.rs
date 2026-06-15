@@ -10,6 +10,7 @@ pub struct AuditPlan {
     pub prompt_home: PathBuf,
     pub pack_name: String,
     pub pack_version: String,
+    pub pack_source: PathBuf,
     pub pack: String,
     pub agent: String,
     pub lenses: Vec<String>,

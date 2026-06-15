@@ -128,6 +128,7 @@ fn print_audit_plan(plan: &AuditPlan, output: &OutputArgs) {
     print_kv("pack", &plan.pack, output);
     print_kv("pack name", &plan.pack_name, output);
     print_kv("pack version", &plan.pack_version, output);
+    print_kv("pack source", plan.pack_source.display(), output);
     print_kv("lenses", display_list_or(&plan.lenses, "none"), output);
     print_kv("optics", display_list_or(&plan.optics, "none"), output);
     print_kv(

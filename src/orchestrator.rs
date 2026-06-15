@@ -17,10 +17,7 @@ use crate::{
         AgentStepRecord, AuditPlan, Domain, DomainMap, InitPlan, PromptPackManifest, RunManifest,
         RunSummary,
     },
-    pack::{
-        ensure_default_pack, pack_root, read_pack_text, render_template, seed_default_pack,
-        snapshot_pack, Pack,
-    },
+    pack::{legacy_pack_root, pack_root, read_pack_text, render_template, snapshot_pack, Pack},
     runner::{run_agent, run_agent_dry_run, AgentRunRequest},
     util::{
         copy_dir_recursive, now_run_id, read_optional, resolve_path, sanitize_id, truncate_chars,
@@ -37,6 +34,10 @@ pub fn build_audit_plan(args: &RunArgs) -> Result<AuditPlan> {
     let output_dir = resolve_output_dir(args, &project_config.output_dir, &repository, &cwd);
     let pack_name = selected_pack_name(args, &project_config.prompt_pack_name);
     let pack_version = selected_pack_version(args, &project_config.prompt_pack_version);
+    let pack_source = project_config
+        .prompt_pack_source
+        .clone()
+        .unwrap_or_else(|| pack_root(&prompt_home, &pack_name, &pack_version));
     let lenses = selected_lenses(args);
     let optics = selected_optics(args, &project_config.disabled_optics);
     let previous_runs = selected_previous_runs(args, &output_dir)?;
@@ -48,6 +49,7 @@ pub fn build_audit_plan(args: &RunArgs) -> Result<AuditPlan> {
         prompt_home,
         pack_name,
         pack_version,
+        pack_source,
         pack: args.pack.as_str().to_owned(),
         agent: selected_agent(args, &project_config.default_agent),
         lenses: lenses.iter().map(|lens| lens.as_str().to_owned()).collect(),
@@ -78,19 +80,15 @@ pub fn init_project(args: &crate::cli::InitArgs) -> Result<InitPlan> {
         });
     }
 
-    let pack_root = seed_default_pack(
-        &prompt_home,
-        &args.pack_name,
-        &args.pack_version,
-        args.force,
-    )?;
-
     fs::create_dir_all(project_config_dir.join("agents"))
         .with_context(|| format!("create {}", project_config_dir.join("agents").display()))?;
 
     write_text_if_absent(
         &project_config_dir.join("config.toml"),
-        project_config_template(&args.pack_name, &args.pack_version, &pack_root),
+        project_config_template(
+            &args.pack_version,
+            &pack_root(&prompt_home, &args.pack_name, &args.pack_version),
+        ),
         args.force,
     )?;
     write_text_if_absent(
@@ -122,14 +120,6 @@ pub fn execute_audit(args: &RunArgs) -> Result<RunSummary> {
 
     let project_config = load_project_config(plan.config.as_deref())?;
     let pack = resolve_pack(&plan, project_config.prompt_pack_source.as_deref())?;
-    if !pack.root.exists() {
-        bail!(
-            "prompt pack `{}` version `{}` was not found at {}; run `ultraudit init` first",
-            pack.name,
-            pack.version,
-            pack.root.display()
-        );
-    }
 
     fs::create_dir_all(&plan.output_dir)
         .with_context(|| format!("create {}", plan.output_dir.display()))?;
@@ -166,6 +156,7 @@ pub fn execute_audit(args: &RunArgs) -> Result<RunSummary> {
     let (repository_md_path, _) = write_repository_artifacts(&run_dir, &repository)?;
     let repository_context = repository_markdown(&repository);
     let domains = infer_domains(&repository, &plan.domains);
+    let domain_map_context = domain_map_markdown(&domains);
 
     let mode = if plan.dry_run {
         RunnerMode::DryRun {
@@ -209,6 +200,7 @@ pub fn execute_audit(args: &RunArgs) -> Result<RunSummary> {
                 &pack,
                 &base_reviewer_guidance,
                 &repository_context,
+                &domain_map_context,
                 domain,
                 *lens,
             )?;
@@ -218,31 +210,28 @@ pub fn execute_audit(args: &RunArgs) -> Result<RunSummary> {
                 .push(report);
             all_findings.push(findings);
         }
-
-        for optic in &selected_optics {
-            let (report, findings) = run_optic_review(
-                &mut runner,
-                &pack,
-                &base_reviewer_guidance,
-                &repository_context,
-                domain,
-                *optic,
-            )?;
-            domain_review_reports
-                .entry(domain.domain_id.clone())
-                .or_default()
-                .push(report);
-            all_findings.push(findings);
-        }
     }
 
-    let cross_domain_findings = run_cross_domain_review(
+    for optic in &selected_optics {
+        let (_report, findings) = run_project_optic_review(
+            &mut runner,
+            &pack,
+            &base_reviewer_guidance,
+            &repository_context,
+            &domain_map_context,
+            *optic,
+        )?;
+        all_findings.push(findings);
+    }
+
+    let cross_system_findings = run_cross_system_review(
         &mut runner,
         &pack,
         &base_reviewer_guidance,
         &repository_context,
+        &domain_map_context,
     )?;
-    all_findings.push(cross_domain_findings);
+    all_findings.push(cross_system_findings);
 
     let mut domain_synthesis_reports = Vec::new();
     for domain in &domains {
@@ -414,6 +403,7 @@ fn run_lens_review(
     pack: &Pack,
     base_reviewer_guidance: &str,
     repository_context: &str,
+    domain_map: &str,
     domain: &Domain,
     lens: Lens,
 ) -> Result<(PathBuf, PathBuf)> {
@@ -428,19 +418,28 @@ fn run_lens_review(
         lens.as_str()
     ));
     let output_paths = output_paths(&report_path, &findings_path, "reviewer notes in raw dir");
-    let template = read_pack_text(&pack.lens_prompt(lens))?;
+    let template = read_pack_text(&pack.prompt("domain-lens-review"))?;
+    let lens_prompt = read_pack_text(&pack.lens_prompt(lens))?;
     let practices = read_pack_text(&pack.lens_practices(lens))?;
+    let evidence = read_pack_text(&pack.lens_evidence(lens))?;
+    let false_positives = read_pack_text(&pack.lens_false_positives(lens))?;
+    let integration = integration_context(pack)?;
     let domain_context = domain_markdown(domain);
     let prompt = render_template(
         &template,
         &map_values([
             ("base_reviewer_guidance", base_reviewer_guidance),
+            ("lens_prompt", &lens_prompt),
             ("repository_context", repository_context),
             ("domain_context", &domain_context),
+            ("domain_map", domain_map),
             ("domain_id", &domain.domain_id),
             ("domain_name", &domain.name),
             ("lens_id", lens.as_str()),
             ("lens_practices", &practices),
+            ("lens_evidence", &evidence),
+            ("lens_false_positives", &false_positives),
+            ("integration_context", &integration),
             ("output_paths", &output_paths),
         ]),
     );
@@ -457,86 +456,90 @@ fn run_lens_review(
     Ok((report_path, findings_path))
 }
 
-fn run_optic_review(
+fn run_project_optic_review(
     runner: &mut StepRunner,
     pack: &Pack,
     base_reviewer_guidance: &str,
     repository_context: &str,
-    domain: &Domain,
+    domain_map: &str,
     optic: Optic,
 ) -> Result<(PathBuf, PathBuf)> {
-    let report_path = runner.run_dir.join("reports/optics").join(format!(
-        "{}.{}.md",
-        domain.domain_id,
-        optic.as_str()
-    ));
-    let findings_path = runner.run_dir.join("findings").join(format!(
-        "{}.{}.yaml",
-        domain.domain_id,
-        optic.as_str()
-    ));
+    let report_path = runner
+        .run_dir
+        .join("reports/optics")
+        .join(format!("{}.md", optic.as_str()));
+    let findings_path = runner
+        .run_dir
+        .join("findings")
+        .join(format!("{}.yaml", optic.as_str()));
     let output_paths = output_paths(&report_path, &findings_path, "reviewer notes in raw dir");
-    let template = read_pack_text(&pack.optic_prompt(optic))?;
+    let template = read_pack_text(&pack.prompt("project-optic-review"))?;
+    let optic_prompt = read_pack_text(&pack.optic_prompt(optic))?;
     let practices = read_pack_text(&pack.optic_practices(optic))?;
-    let domain_context = domain_markdown(domain);
+    let evidence = read_pack_text(&pack.optic_evidence(optic))?;
+    let false_positives = read_pack_text(&pack.optic_false_positives(optic))?;
+    let integration = integration_context(pack)?;
     let prompt = render_template(
         &template,
         &map_values([
             ("base_reviewer_guidance", base_reviewer_guidance),
+            ("optic_prompt", &optic_prompt),
             ("repository_context", repository_context),
-            ("domain_context", &domain_context),
-            ("domain_id", &domain.domain_id),
-            ("domain_name", &domain.name),
+            ("domain_map", domain_map),
             ("optic_id", optic.as_str()),
             ("optic_practices", &practices),
+            ("optic_evidence", &evidence),
+            ("optic_false_positives", &false_positives),
+            ("integration_context", &integration),
             ("output_paths", &output_paths),
         ]),
     );
 
     let _ = runner.run(
-        &format!("{}-{}", domain.domain_id, optic.as_str()),
-        &format!("{} optic review", optic.as_str()),
+        optic.as_str(),
+        &format!("{} project optic review", optic.as_str()),
         prompt,
         report_path.clone(),
         findings_path.clone(),
     )?;
-    ensure_review_report(
-        &report_path,
-        &format!("{} / {}", domain.name, optic.title()),
-    )?;
+    ensure_review_report(&report_path, &format!("{} Project Optic", optic.title()))?;
     ensure_empty_findings(&findings_path)?;
     Ok((report_path, findings_path))
 }
 
-fn run_cross_domain_review(
+fn run_cross_system_review(
     runner: &mut StepRunner,
     pack: &Pack,
     base_reviewer_guidance: &str,
     repository_context: &str,
+    domain_map: &str,
 ) -> Result<PathBuf> {
-    let report_path = runner.run_dir.join("reports/cross-domain.md");
-    let findings_path = runner.run_dir.join("findings/cross-domain.yaml");
-    let domain_map = read_optional(&runner.run_dir.join("domain-map.md"))?.unwrap_or_default();
+    let report_path = runner.run_dir.join("reports/cross-system.md");
+    let findings_path = runner.run_dir.join("findings/cross-system.yaml");
     let output_paths = output_paths(&report_path, &findings_path, "reviewer notes in raw dir");
-    let template = read_pack_text(&pack.prompt("cross-domain"))?;
+    let template = read_pack_text(&pack.prompt("cross-system-review"))?;
+    let integration = integration_context(pack)?;
+    let cross_system_lenses = cross_system_lenses();
     let prompt = render_template(
         &template,
         &map_values([
             ("base_reviewer_guidance", base_reviewer_guidance),
             ("repository_context", repository_context),
-            ("domain_map", &domain_map),
+            ("domain_map", domain_map),
+            ("integration_context", &integration),
+            ("cross_system_lenses", &cross_system_lenses),
             ("output_paths", &output_paths),
         ]),
     );
 
     let _ = runner.run(
-        "cross-domain",
-        "cross-domain review",
+        "cross-system",
+        "cross-system review",
         prompt,
         report_path.clone(),
         findings_path.clone(),
     )?;
-    ensure_review_report(&report_path, "Cross-Domain Review")?;
+    ensure_review_report(&report_path, "Cross-System Review")?;
     ensure_empty_findings(&findings_path)?;
     Ok(findings_path)
 }
@@ -560,7 +563,8 @@ fn run_domain_synthesis(
     let domain_context = domain_markdown(domain);
     let output_paths = output_paths(&report_path, &findings_path, "synthesis notes in raw dir");
     let template = read_pack_text(&pack.prompt("domain-synthesis"))?;
-    let mut prompt = render_template(
+    let integration = integration_context(pack)?;
+    let prompt = render_template(
         &template,
         &map_values([
             ("base_reviewer_guidance", base_reviewer_guidance),
@@ -568,11 +572,10 @@ fn run_domain_synthesis(
             ("domain_name", &domain.name),
             ("domain_context", &domain_context),
             ("domain_findings", &domain_findings),
+            ("integration_context", &integration),
             ("output_paths", &output_paths),
         ]),
     );
-    prompt.push_str("\n\n## Domain Review Inputs\n\n");
-    prompt.push_str(&domain_findings);
 
     let _ = runner.run(
         &format!("{}-synthesis", domain.domain_id),
@@ -602,17 +605,17 @@ fn run_system_synthesis(
         "system synthesis notes in raw dir",
     );
     let template = read_pack_text(&pack.prompt("system-synthesis"))?;
-    let mut prompt = render_template(
+    let integration = integration_context(pack)?;
+    let prompt = render_template(
         &template,
         &map_values([
             ("base_reviewer_guidance", base_reviewer_guidance),
             ("repository_context", repository_context),
             ("synthesis_inputs", &synthesis_inputs),
+            ("integration_context", &integration),
             ("output_paths", &output_paths),
         ]),
     );
-    prompt.push_str("\n\n## Domain Synthesis Reports\n\n");
-    prompt.push_str(&synthesis_inputs);
 
     let _ = runner.run(
         "system-synthesis",
@@ -641,19 +644,17 @@ fn run_previous_runs_comparison(
     let previous_run_context = previous_run_context(previous_runs)?;
     let output_paths = output_paths(&report_path, &findings_path, "comparison notes in raw dir");
     let template = read_pack_text(&pack.prompt("previous-runs-comparison"))?;
-    let mut prompt = render_template(
+    let integration = integration_context(pack)?;
+    let prompt = render_template(
         &template,
         &map_values([
             ("base_reviewer_guidance", base_reviewer_guidance),
             ("current_findings", &current_findings),
             ("previous_run_context", &previous_run_context),
+            ("integration_context", &integration),
             ("output_paths", &output_paths),
         ]),
     );
-    prompt.push_str("\n\n## Current Findings\n\n");
-    prompt.push_str(&current_findings);
-    prompt.push_str("\n\n## Previous Runs\n\n");
-    prompt.push_str(&previous_run_context);
 
     let _ = runner.run(
         "previous-runs-comparison",
@@ -689,16 +690,18 @@ fn run_final_editor(
         "final editor notes in raw dir",
     );
     let template = read_pack_text(&pack.prompt("final-editor"))?;
-    let mut prompt = render_template(
+    let integration = integration_context(pack)?;
+    let final_editor_checklist = read_pack_text(&pack.integration("final-editor-checklist"))?;
+    let prompt = render_template(
         &template,
         &map_values([
             ("base_reviewer_guidance", base_reviewer_guidance),
-            ("final_editor_inputs", &inputs),
+            ("final_editor_inputs", &truncate_chars(&inputs, 120_000)),
+            ("integration_context", &integration),
+            ("final_editor_checklist", &final_editor_checklist),
             ("output_paths", &output_paths),
         ]),
     );
-    prompt.push_str("\n\n## Report Inputs\n\n");
-    prompt.push_str(&truncate_chars(&inputs, 120_000));
 
     let _ = runner.run(
         "final-editor",
@@ -712,12 +715,35 @@ fn run_final_editor(
 }
 
 fn resolve_pack(plan: &AuditPlan, configured_source: Option<&Path>) -> Result<Pack> {
-    let root = configured_source
-        .map(PathBuf::from)
-        .unwrap_or_else(|| pack_root(&plan.prompt_home, &plan.pack_name, &plan.pack_version));
+    let root = if let Some(configured_source) = configured_source {
+        configured_source.to_path_buf()
+    } else {
+        let current = pack_root(&plan.prompt_home, &plan.pack_name, &plan.pack_version);
+        if current.exists() {
+            current
+        } else {
+            let legacy_named =
+                legacy_pack_root(&plan.prompt_home, &plan.pack_name, &plan.pack_version);
+            let legacy_default =
+                legacy_pack_root(&plan.prompt_home, "ultraudit-default", &plan.pack_version);
+            if legacy_named.exists() {
+                legacy_named
+            } else if legacy_default.exists() {
+                legacy_default
+            } else {
+                current
+            }
+        }
+    };
 
-    if !root.exists() && plan.pack_name == "ultraudit-default" {
-        let _ = ensure_default_pack(&plan.prompt_home, &plan.pack_name, &plan.pack_version)?;
+    if !root.exists() {
+        bail!(
+            "prompt pack `{}` version `{}` was not found at {}; run `make install` from the Ultraudit repository to install packs/{}",
+            plan.pack_name,
+            plan.pack_version,
+            root.display(),
+            plan.pack_version
+        );
     }
 
     Ok(Pack {
@@ -743,7 +769,7 @@ fn resolve_output_dir(
 }
 
 fn selected_pack_name(args: &RunArgs, configured: &Option<String>) -> String {
-    if args.pack_name == "ultraudit-default" {
+    if args.pack_name == "default" {
         configured.clone().unwrap_or_else(|| args.pack_name.clone())
     } else {
         args.pack_name.clone()
@@ -751,13 +777,35 @@ fn selected_pack_name(args: &RunArgs, configured: &Option<String>) -> String {
 }
 
 fn selected_pack_version(args: &RunArgs, configured: &Option<String>) -> String {
-    if args.pack_version == "0.1.0" {
+    if args.pack_version == "0.2.0" {
         configured
             .clone()
             .unwrap_or_else(|| args.pack_version.clone())
     } else {
         args.pack_version.clone()
     }
+}
+
+fn integration_context(pack: &Pack) -> Result<String> {
+    let mut output = String::new();
+    for name in [
+        "evidence-model",
+        "severity-model",
+        "confidence-model",
+        "deduplication-rules",
+    ] {
+        output.push_str(&format!("\n\n## {name}\n\n"));
+        output.push_str(&read_pack_text(&pack.integration(name))?);
+    }
+    Ok(output)
+}
+
+fn cross_system_lenses() -> String {
+    Lens::cross_system_default()
+        .iter()
+        .map(|lens| lens.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn selected_agent(args: &RunArgs, configured: &Option<String>) -> String {
@@ -965,10 +1013,9 @@ fn map_values<'a>(
         .collect()
 }
 
-fn project_config_template(pack_name: &str, pack_version: &str, pack_root: &Path) -> String {
+fn project_config_template(pack_version: &str, pack_root: &Path) -> String {
     format!(
         r#"[prompt_pack]
-name = "{pack_name}"
 version = "{pack_version}"
 source = "{}"
 

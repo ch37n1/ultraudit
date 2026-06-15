@@ -5,26 +5,27 @@ Tool to audit applications
 
 Ultraudit is a Rust CLI orchestrator for repeatable agentic application audits. The v1 flow can:
 
-- seed a user-level prompt/practice pack from `.local/research`;
+- use a versioned prompt/practice pack installed from `packs/0.2.0`;
 - create project-local `.audit/config.toml` and agent runner config;
 - collect repository intake and deterministic fallback domains;
-- run domain discovery, lens/optic reviews, cross-domain review, domain synthesis, system synthesis, previous-run comparison, and final editorial verification;
+- run domain discovery, domain lens reviews, project optic reviews, cross-system review, domain synthesis, system synthesis, previous-run comparison, and final editorial verification;
 - preserve prompts, invocation manifests, command summaries, stdout/stderr, exit metadata, findings files, reports, suggestions, and a prompt-pack snapshot under each run directory.
 
 Typical commands:
 
 ```bash
-cargo run -- init
-cargo run -- run --pack full
-cargo run -- run --plan --pack production
-cargo run -- run --dry-run --pack production
+make install
+ultraudit init
+ultraudit run --plan --pack default
+ultraudit run --pack full
+ultraudit run --dry-run --pack production
 ULTRAUDIT_PATH=./for-test ultraudit run --dry-run
-cargo run -- run --agent codex --lens security --domain auth
+ultraudit run --agent codex --lens security --domain auth
 ```
 
 The default `codex` agent uses a typed Codex CLI invocation. Unknown agents can be configured as shell-template runners under `.audit/agents/`. The `nice-practices` optic exists as a v1 placeholder only; it intentionally contains no substantive personal practices yet.
 
-`ULTRAUDIT_PATH` overrides the default prompt/practice home (`~/.ultraudit`). `run --plan` only prints the resolved plan. `run --dry-run` writes normal run artifacts while faking every agent call, which is intended for automated end-to-end tests.
+`make install` builds the release binary, installs it to `~/.local/bin/ultraudit` by default, and copies `packs/0.2.0` to `~/.ultraudit/packs/0.2.0`. `ultraudit init` only writes project-local `.audit/` configuration and does not generate or copy prompt packs. `ULTRAUDIT_PATH` overrides the default prompt/practice home (`~/.ultraudit`). `run --plan` only prints the resolved plan. `run --dry-run` writes normal run artifacts while faking every agent call, which is intended for automated end-to-end tests.
 
 ## Documentation
 

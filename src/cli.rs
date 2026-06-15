@@ -5,6 +5,8 @@ use serde::Serialize;
 
 const LONG_HELP: &str = "\
 EXAMPLES:
+    make install
+    ultraudit init
     ultraudit run --pack full
     ultraudit run --pack production --domain auth
     ultraudit run --lens security --lens correctness
@@ -89,12 +91,12 @@ pub struct RunArgs {
     )]
     pub prompt_home: PathBuf,
 
-    /// Prompt pack name.
-    #[arg(long, value_name = "NAME", default_value = "ultraudit-default")]
+    /// Deprecated prompt pack compatibility name.
+    #[arg(long, value_name = "NAME", default_value = "default")]
     pub pack_name: String,
 
     /// Prompt pack version.
-    #[arg(long, value_name = "VERSION", default_value = "0.1.0")]
+    #[arg(long, value_name = "VERSION", default_value = "0.2.0")]
     pub pack_version: String,
 
     /// Named lens pack to run.
@@ -153,12 +155,12 @@ pub struct InitArgs {
     )]
     pub prompt_home: PathBuf,
 
-    /// Prompt pack name to seed.
-    #[arg(long, value_name = "NAME", default_value = "ultraudit-default")]
+    /// Deprecated prompt pack compatibility name.
+    #[arg(long, value_name = "NAME", default_value = "default")]
     pub pack_name: String,
 
-    /// Prompt pack version to seed.
-    #[arg(long, value_name = "VERSION", default_value = "0.1.0")]
+    /// Prompt pack version to reference in project config.
+    #[arg(long, value_name = "VERSION", default_value = "0.2.0")]
     pub pack_version: String,
 
     /// Overwrite existing starter files when init is implemented.
@@ -295,6 +297,19 @@ impl Lens {
             Lens::PrivacyCompliance,
             Lens::DependencySupplyChain,
             Lens::UxProduct,
+            Lens::MlAi,
+        ]
+    }
+
+    pub fn cross_system_default() -> &'static [Lens] {
+        &[
+            Lens::Architecture,
+            Lens::Security,
+            Lens::Reliability,
+            Lens::Operations,
+            Lens::ApiContracts,
+            Lens::DataIntegrity,
+            Lens::PrivacyCompliance,
             Lens::MlAi,
         ]
     }
