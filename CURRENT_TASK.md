@@ -31,6 +31,23 @@ Do **not** create one shallow global source map and stop there. For each review 
 
 If full coverage of all lenses is impossible in one run, prefer producing fewer complete lens packs over shallow coverage of every lens. Mark unfinished lenses explicitly.
 
+## Current Resume Point
+
+Previous runs have already created complete first-pass lens packs under `.local/research/`. Treat those files as the baseline corpus. Do not restart the whole research from scratch and do not overwrite completed lens packs unless a concrete stack-specific addition needs to be linked into them.
+
+The next run should be **Batch 8: language and stack practice expansion**. Its job is to extend the existing practice pack with practical, source-backed review guidance for specific languages and implementation stacks:
+
+1. Rust
+2. Python
+3. TypeScript
+4. HTML and CSS
+5. Swift
+6. Kotlin
+
+This batch must make the language guidance useful for Ultraudit reviewers. Do not write language tutorials. Extract reviewable practice atoms, failure modes, evidence signals, false-positive risks, severity hints, confidence hints, and prompt guidance that can be used while reviewing real repositories.
+
+Use `.local/handbooks/` as local preference and context material. Treat those files as internal guidance, not external proof. When handbook guidance conflicts with external sources, document the conflict and prefer source-backed wording while preserving the local preference as an Ultraudit-specific convention where appropriate.
+
 ## Review Lenses
 
 Research these Ultraudit lenses:
@@ -55,6 +72,11 @@ Also produce stack-specific and application-archetype-specific practice material
 
 - general application review
 - Rust
+- Python
+- TypeScript
+- HTML and CSS
+- Swift
+- Kotlin
 - CLI tools
 - async/concurrent systems
 - backend APIs
@@ -97,10 +119,10 @@ lens -> subtopics -> application archetype variations -> practice atoms -> promp
 
 ## Output Directory
 
-Create the following output structure in the repository:
+Append to the existing output structure in the repository. The active output root is `.local/research/`; if older instructions or generated indexes mention `research/`, interpret them as `.local/research/` for this workspace.
 
 ```text
-research/
+.local/research/
   plan.md
   source-rubric.md
   progress.md
@@ -120,6 +142,13 @@ research/
   stacks/
     general.md
     rust.md
+    python.md
+    typescript.md
+    html-css.md
+    swift.md
+    kotlin.md
+    language-stack-index.md
+    favorite-practices.md
     cli.md
     async-concurrent.md
     backend-api.md
@@ -157,7 +186,22 @@ research/
     final-editor-template.md
 ```
 
-If you cannot complete every file, keep `progress.md` accurate and explicit.
+If you cannot complete every file, keep `.local/research/progress.md` accurate and explicit.
+
+For Batch 8, keep existing files and add or update only what is needed. At minimum, create or expand:
+
+- `.local/research/stacks/rust.md`
+- `.local/research/stacks/python.md`
+- `.local/research/stacks/typescript.md`
+- `.local/research/stacks/html-css.md`
+- `.local/research/stacks/swift.md`
+- `.local/research/stacks/kotlin.md`
+- `.local/research/stacks/language-stack-index.md`
+- `.local/research/stacks/favorite-practices.md`
+- `.local/research/file-index.md`
+- `.local/research/progress.md`
+
+If a language file becomes too large, create a subdirectory under `.local/research/stacks/<language>/` with `source-map.md`, `source-map.yaml`, `coverage-matrix.md`, `practice-atoms.yaml`, `practices.md`, `prompt-guidance.md`, and `research-gaps.md`, then keep `.local/research/stacks/<language>.md` as the concise entry point.
 
 ## Source Quality Rubric
 
@@ -413,6 +457,99 @@ Additional mandatory completion requirements:
 - The stack/archetype-specific material is not complete until web applications, backend services, mobile applications, CLI tools, and ML/AI systems each have dedicated source-backed practice notes where their review signals differ from generic practice.
 - The `ml-ai` lens is not complete until it covers both classical ML system review concerns and modern LLM/RAG/agentic-system concerns.
 
+## Batch 8 Language/Stack Expansion Loop
+
+For each target language or stack, run a focused version of the research loop. Reuse the existing 15 lenses as review optics, but do not duplicate entire lens packs.
+
+### 1. Define Stack Scope
+
+For each of Rust, Python, TypeScript, HTML and CSS, Swift, and Kotlin, define:
+
+- common application contexts in which Ultraudit is likely to see the stack;
+- neighboring stacks and frameworks that materially change review signals;
+- defect classes that are language-specific or ecosystem-specific;
+- which of the 15 review lenses are especially important for the stack;
+- what this stack file should not own because it belongs in a lens pack or archetype pack.
+
+### 2. Source Discovery Targets
+
+Per language, aim for:
+
+- `15-30` discovered sources;
+- `10-20` accepted sources after triage;
+- at least `5` primary, official, standards, or authoritative sources;
+- at least `3` tooling or framework documentation sources;
+- at least `2` security, reliability, performance, or incident-oriented sources where available;
+- an explicit rejected/deferred source list.
+
+Use official docs and tooling docs first. Examples of expected source families:
+
+- Rust: Rust Reference, Rust Book, Rustonomicon, Rust API Guidelines, Cargo, Clippy, rustfmt, Tokio, RustSec, major web/CLI ecosystem docs where relevant.
+- Python: Python docs, PEPs, Packaging User Guide, PyPI, pip, virtualenv/venv, Ruff, mypy/pyright, pytest, asyncio, FastAPI/Django/Pydantic where relevant, Python security guidance.
+- TypeScript: TypeScript handbook/config docs, Node.js docs, npm, ESLint/typescript-eslint, React/Next.js where relevant, browser platform docs, bundler/tooling docs.
+- HTML and CSS: WHATWG/W3C specs where useful, MDN, WCAG/WAI, web.dev, browser compatibility and performance guidance, form/accessibility/security guidance.
+- Swift: Swift language docs, Swift API Design Guidelines, Swift concurrency docs, Apple platform docs, Swift Package Manager, SwiftLint, XCTest, SwiftUI/UIKit where relevant.
+- Kotlin: Kotlin docs, Kotlin style/coding conventions, coroutines docs, Gradle, Android Developers, Jetpack/Compose where relevant, Ktor/Spring where relevant, Detekt/ktlint.
+
+### 3. Required Sections Per Language File
+
+Each `.local/research/stacks/<language>.md` file must include:
+
+- status and freshness date;
+- source summary with accepted and rejected/deferred sources;
+- stack scope and common repository shapes;
+- lens-by-lens optics across all 15 Ultraudit lenses;
+- high-value review questions;
+- concrete code and configuration signals reviewers should search for;
+- language-specific anti-patterns and false-positive risks;
+- evidence requirements for findings;
+- severity and confidence guidance;
+- remediation patterns;
+- testing and tooling expectations;
+- package/dependency/build-system review notes;
+- framework or platform variations where materially different;
+- prompt guidance that can be pasted into an Ultraudit reviewer prompt;
+- research gaps and refresh triggers.
+
+### 4. Practice Atom Requirements
+
+Extract language-specific practice atoms using the same structured intent as lens atoms. Every atom should answer:
+
+- what defect it helps find;
+- which lens or lenses it supports;
+- which files, configs, or code paths provide evidence;
+- what realistic impact the defect can cause;
+- when severity should be raised or lowered;
+- what makes the finding high, medium, or low confidence;
+- which sources support the practice.
+
+Do not include style preferences unless they connect to maintainability, correctness, safety, accessibility, performance, security, or operational review outcomes.
+
+### 5. Lens Optics Requirement
+
+For every language, include a compact "Optics by lens" section. It must cover all 15 lenses and answer how review signals change in that stack. Examples:
+
+- Rust correctness: ownership, lifetimes, panic boundaries, unsafe blocks, FFI contracts, integer and parsing behavior, async cancellation safety.
+- Python reliability: import-time side effects, dynamic typing gaps, async event-loop misuse, dependency pinning, environment drift, serialization and timezone behavior.
+- TypeScript API contracts: generated types versus runtime validation, `any` escape hatches, schema drift, frontend/backend contract mismatch.
+- HTML and CSS UX/product: semantic structure, form behavior, responsive layout, focus order, accessibility states, content overflow, reduced-motion behavior.
+- Swift mobile: lifecycle, permissions, privacy manifests, concurrency on the main actor, local storage, networking, background execution.
+- Kotlin mobile/backend: nullability, coroutine cancellation, structured concurrency, Android lifecycle, Gradle dependency resolution, DTO/domain mapping.
+
+### 6. Favorite Practices File
+
+Create or update `.local/research/stacks/favorite-practices.md` as an internal Ultraudit convention file. It should distill local preferences from `.local/handbooks/` and the new language research into concise, reviewable practices.
+
+This file is not a replacement for source-backed stack files. It should clearly distinguish:
+
+- source-backed practices;
+- Ultraudit-specific preferences;
+- open questions that need future validation.
+
+### 7. Progress and Index Updates
+
+Update `.local/research/progress.md` with Batch 8 status, source counts, completed language files, and known weak areas. Update `.local/research/file-index.md` after adding files.
+
 ## Integration Pass
 
 After completing lens-level research, run an integration pass. Do not redo all research. Instead, normalize and connect the lens outputs.
@@ -604,7 +741,9 @@ Your research should make this contract easier to satisfy.
 
 ## Working Rules
 
-- Work iteratively and keep `research/progress.md` current.
+- Work iteratively and keep `.local/research/progress.md` current.
+- Treat `.local/research/` as the active research root.
+- Preserve existing completed lens packs. Append, cross-link, or add stack-specific files instead of replacing prior work.
 - Do not rely on memory when a current source is needed.
 - Prefer primary and official sources.
 - Use secondary sources to enrich practice extraction, not as the only basis for major claims.

@@ -222,6 +222,24 @@ Ultraudit - консольная утилита для глубокого аге
 15. **ML / AI Systems Review**  
     Evals, prompt/RAG/tool-calling quality, prompt injection, data exfiltration, hallucination risks, fallback behavior, train/serve skew, dataset provenance, dataset leakage, model drift, latency, token/cost budget, PII exposure to model vendors, reproducibility, human approval gates.
 
+### Supplemental Optics
+
+Core lenses остаются стабильной таксономией для findings и packs. Supplemental optics - это opt-in проверки, которые используют тот же evidence-first контракт, но не входят в `full` pack по умолчанию, пока не накопят достаточно практики и низкий false-positive rate.
+
+1. **Documentation / Knowledge**
+   Документация как рабочая система знания: source of truth, lifecycle, ownership, discoverability, onboarding routes, runbook quality, stale/conflicting docs, связь docs с delivery, incident и release flows. Не должна превращаться в style review текста: finding нужен только при operational, onboarding, support, safety, compliance или delivery impact.
+
+### Stack And Language Overlays
+
+Lens определяет тип риска, а stack overlay уточняет evidence и false-positive checks для конкретной технологии. Один и тот же finding может быть `security` или `reliability` по primary lens, но использовать `rust`, `python`, `typescript`, `html-css`, `swift` или `kotlin` practice refs.
+
+Начальный набор stack overlays:
+
+- language overlays: Rust, Python, TypeScript, HTML/CSS, Swift, Kotlin;
+- application overlays: CLI tools, async/concurrent systems, backend APIs, web frontend, mobile applications, desktop applications, databases and migrations, distributed systems, AI/RAG/agentic systems, deployment and operations.
+
+Stack overlays не заменяют линзы и не должны создавать отдельный глобальный аудит языка. Их задача - подсказать reviewable failure modes: unsafe/escape hatches, runtime boundary validation, async lifecycle, package-manager semantics, rendered UI/accessibility evidence, platform privacy metadata, model/eval artifacts и другие stack-specific сигналы.
+
 ## Lens Packs
 
 CLI должен поддерживать именованные packs:
@@ -276,6 +294,7 @@ ultraudit run --pack full
 ultraudit run --pack production
 ultraudit run --lens performance --lens security
 ultraudit run --domain auth --pack default
+ultraudit run --optic documentation-knowledge
 ```
 
 ## Finding Contract
@@ -429,10 +448,23 @@ Prompts и practices должны жить вне бинарника:
   practices/
     general.md
     rust.md
-    web.md
-    api.md
+    python.md
+    typescript.md
+    html-css.md
+    swift.md
+    kotlin.md
+    cli.md
+    async-concurrent.md
+    backend-api.md
+    web-frontend.md
+    mobile-apps.md
+    desktop-apps.md
     database.md
+    distributed-systems.md
+    operations.md
     ml-ai.md
+    optics/
+      documentation-knowledge.md
 ```
 
 Self-evolving поведение должно быть контролируемым:
@@ -587,9 +619,19 @@ trait AgentRunner {
 - Явный approval flow.
 - Версионирование prompt packs.
 
-## Темы для исследования практик
+## Слой исследованных практик
 
-Слой practices стоит проектировать после отдельного исследования. Темы:
+Слой practices должен собираться из source-backed lens packs, stack overlays и opt-in supplemental optics. Исследовательские артефакты живут вне бинарника и должны сохранять:
+
+- source maps и coverage matrices;
+- practice atoms;
+- evidence signals;
+- false-positive checks;
+- severity/confidence hints;
+- prompt guidance;
+- research gaps и refresh triggers.
+
+Базовые направления:
 
 - architecture review frameworks;
 - secure code review methodology;
@@ -604,6 +646,8 @@ trait AgentRunner {
 - frontend UX/accessibility review;
 - ML/AI system evaluation, prompt injection, evals and model monitoring;
 - agentic tool safety, approval boundaries and auditability.
+- language-specific review guidance for Rust, Python, TypeScript, HTML/CSS, Swift and Kotlin;
+- documentation/knowledge review guidance as a supplemental optic.
 
 ## Критерии успеха
 

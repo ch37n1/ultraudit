@@ -222,6 +222,24 @@ The final agent does not run another broad audit. Its job is to check the qualit
 15. **ML / AI Systems Review**  
     Evals, prompt/RAG/tool-calling quality, prompt injection, data exfiltration, hallucination risks, fallback behavior, train/serve skew, dataset provenance, dataset leakage, model drift, latency, token/cost budget, PII exposure to model vendors, reproducibility, human approval gates.
 
+### Supplemental Optics
+
+Core lenses remain the stable taxonomy for findings and packs. Supplemental optics are opt-in checks that use the same evidence-first contract, but are not included in the `full` pack by default until they have enough dry-run evidence and an acceptable false-positive rate.
+
+1. **Documentation / Knowledge**
+   Documentation as an operational knowledge system: source of truth, lifecycle, ownership, discoverability, onboarding routes, runbook quality, stale or conflicting docs, and links between docs and delivery, incident, and release flows. This should not become a writing-style review: a finding needs operational, onboarding, support, safety, compliance, or delivery impact.
+
+### Stack And Language Overlays
+
+The lens defines the risk type, while the stack overlay refines evidence and false-positive checks for a specific technology. The same finding can have `security` or `reliability` as its primary lens while using `rust`, `python`, `typescript`, `html-css`, `swift`, or `kotlin` practice refs.
+
+Initial stack overlays:
+
+- language overlays: Rust, Python, TypeScript, HTML/CSS, Swift, Kotlin;
+- application overlays: CLI tools, async/concurrent systems, backend APIs, web frontend, mobile applications, desktop applications, databases and migrations, distributed systems, AI/RAG/agentic systems, deployment and operations.
+
+Stack overlays do not replace lenses and should not create a separate global language audit. Their job is to provide reviewable failure modes: unsafe/escape hatches, runtime boundary validation, async lifecycle, package-manager semantics, rendered UI/accessibility evidence, platform privacy metadata, model/eval artifacts, and other stack-specific signals.
+
 ## Lens Packs
 
 The CLI should support named packs:
@@ -276,6 +294,7 @@ ultraudit run --pack full
 ultraudit run --pack production
 ultraudit run --lens performance --lens security
 ultraudit run --domain auth --pack default
+ultraudit run --optic documentation-knowledge
 ```
 
 ## Finding Contract
@@ -429,10 +448,23 @@ Prompts and practices should live outside the binary:
   practices/
     general.md
     rust.md
-    web.md
-    api.md
+    python.md
+    typescript.md
+    html-css.md
+    swift.md
+    kotlin.md
+    cli.md
+    async-concurrent.md
+    backend-api.md
+    web-frontend.md
+    mobile-apps.md
+    desktop-apps.md
     database.md
+    distributed-systems.md
+    operations.md
     ml-ai.md
+    optics/
+      documentation-knowledge.md
 ```
 
 Self-evolving behavior must be controlled:
@@ -587,9 +619,19 @@ Expected runners:
 - Add explicit approval flow.
 - Version prompt packs.
 
-## Open Research Topics For Practices
+## Researched Practices Layer
 
-The practices layer should be designed after dedicated research. Topics:
+The practices layer should be assembled from source-backed lens packs, stack overlays, and opt-in supplemental optics. Research artifacts live outside the binary and should preserve:
+
+- source maps and coverage matrices;
+- practice atoms;
+- evidence signals;
+- false-positive checks;
+- severity/confidence hints;
+- prompt guidance;
+- research gaps and refresh triggers.
+
+Baseline areas:
 
 - architecture review frameworks;
 - secure code review methodology;
@@ -604,6 +646,8 @@ The practices layer should be designed after dedicated research. Topics:
 - frontend UX/accessibility review;
 - ML/AI system evaluation, prompt injection, evals, and model monitoring;
 - agentic tool safety, approval boundaries, and auditability.
+- language-specific review guidance for Rust, Python, TypeScript, HTML/CSS, Swift, and Kotlin;
+- documentation/knowledge review guidance as a supplemental optic.
 
 ## Success Criteria
 
