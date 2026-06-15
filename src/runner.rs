@@ -258,16 +258,16 @@ fn build_invocation(
 
 fn build_codex_invocation(config: &AgentConfig) -> (PathBuf, Vec<String>) {
     let mut args = Vec::new();
-    if !config.mode.is_empty() {
-        args.push(config.mode.clone());
-    }
     if !config.approval_policy.is_empty() {
-        args.push("--approval-policy".to_owned());
+        args.push("--ask-for-approval".to_owned());
         args.push(config.approval_policy.clone());
     }
     if !config.sandbox.is_empty() {
         args.push("--sandbox".to_owned());
         args.push(config.sandbox.clone());
+    }
+    if !config.mode.is_empty() {
+        args.push(config.mode.clone());
     }
 
     (config.binary.clone(), args)

@@ -2,6 +2,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use std::{
     fs,
+    os::unix::fs::PermissionsExt,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -197,6 +198,88 @@ command = "mkdir -p $(dirname {{ report_path_sh }}) $(dirname {{ findings_path_s
     assert!(!run_dir
         .join("reports/optics/core.documentation-knowledge.md")
         .exists());
+}
+
+#[test]
+fn codex_cli_agent_uses_current_codex_exec_flags() {
+    let workspace = temp_workspace("codex-flags");
+    let repo = workspace.join("repo");
+    let project_config_dir = repo.join(".audit");
+    let prompt_home = workspace.join("home");
+    let output_dir = workspace.join("runs");
+    let fake_codex = workspace.join("fake-codex");
+    let recorded_args = workspace.join("codex-args.txt");
+
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"sample\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn sample() -> bool { true }\n",
+    )
+    .unwrap();
+    fs::write(
+        &fake_codex,
+        "#!/bin/sh\nscript_dir=$(dirname \"$0\")\nprintf '%s\\n' \"$@\" > \"$script_dir/codex-args.txt\"\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&fake_codex).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_codex, permissions).unwrap();
+
+    let mut init = Command::cargo_bin("ultraudit").unwrap();
+    init.arg("init")
+        .arg("--project-config-dir")
+        .arg(&project_config_dir)
+        .arg("--prompt-home")
+        .arg(&prompt_home)
+        .assert()
+        .success();
+    install_test_pack(&prompt_home);
+
+    fs::write(
+        project_config_dir.join("agents/fake-codex.toml"),
+        format!(
+            r#"kind = "codex-cli"
+binary = "{}"
+mode = "exec"
+prompt_transport = "stdin"
+approval_policy = "never"
+sandbox = "workspace-write"
+timeout_seconds = 30
+"#,
+            fake_codex.display()
+        ),
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("ultraudit").unwrap();
+    cmd.arg("run")
+        .arg("--repo")
+        .arg(&repo)
+        .arg("--config")
+        .arg(project_config_dir.join("config.toml"))
+        .arg("--prompt-home")
+        .arg(&prompt_home)
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .arg("--agent")
+        .arg("fake-codex")
+        .arg("--lens")
+        .arg("architecture")
+        .arg("--domain")
+        .arg("core")
+        .assert()
+        .success();
+
+    let args = fs::read_to_string(recorded_args).unwrap();
+    assert_eq!(
+        args,
+        "--ask-for-approval\nnever\n--sandbox\nworkspace-write\nexec\n"
+    );
 }
 
 #[test]
