@@ -62,22 +62,25 @@ fn init_tracing(output: &OutputArgs) {
 fn run_audit(args: RunArgs, output: &OutputArgs) -> Result<()> {
     let plan = orchestrator::build_audit_plan(&args)?;
 
-    if args.dry_run {
+    if args.plan {
         if matches!(output.format, OutputFormat::Json) {
             anstream::println!("{}", serde_json::to_string_pretty(&plan)?);
         } else {
             print_audit_plan(&plan, output);
-            print_status(
-                "dry-run",
-                "CLI, config, pack selection, and run locations resolved; no agent processes started.",
-                output,
-            );
+            print_status("plan", "Resolved only; no files written.", output);
         }
         return Ok(());
     }
 
     if matches!(output.format, OutputFormat::Text) {
         print_audit_plan(&plan, output);
+        if args.dry_run {
+            print_status(
+                "dry-run",
+                "Agent calls will be faked; prompts and run artifacts will still be written.",
+                output,
+            );
+        }
     }
 
     let summary = orchestrator::execute_audit(&args)?;
@@ -116,6 +119,11 @@ fn print_audit_plan(plan: &AuditPlan, output: &OutputArgs) {
     print_kv("output dir", plan.output_dir.display(), output);
     print_kv("config", display_option_path(plan.config.as_ref()), output);
     print_kv("prompt home", plan.prompt_home.display(), output);
+    print_kv(
+        "mode",
+        if plan.dry_run { "dry-run" } else { "real" },
+        output,
+    );
     print_kv("agent", &plan.agent, output);
     print_kv("pack", &plan.pack, output);
     print_kv("pack name", &plan.pack_name, output);
@@ -152,6 +160,11 @@ fn print_run_summary(summary: &RunSummary, output: &OutputArgs) {
     print_kv("run id", &summary.run_id, output);
     print_kv("run dir", summary.run_dir.display(), output);
     print_kv("final report", summary.final_report.display(), output);
+    print_kv(
+        "mode",
+        if summary.dry_run { "dry-run" } else { "real" },
+        output,
+    );
     print_kv("domains", display_list_or(&summary.domains, "none"), output);
     print_kv("lenses", display_list_or(&summary.lenses, "none"), output);
     print_kv("optics", display_list_or(&summary.optics, "none"), output);

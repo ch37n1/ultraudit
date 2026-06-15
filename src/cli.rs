@@ -10,7 +10,8 @@ EXAMPLES:
     ultraudit run --lens security --lens correctness
     ultraudit run --optic documentation-knowledge
     ultraudit run --agent codex --prompt-home ~/.ultraudit
-    ultraudit run --dry-run --pack default
+    ULTRAUDIT_PATH=./for-test ultraudit run --dry-run
+    ultraudit run --plan --pack default
 
 COMPLETIONS:
     ultraudit completions zsh > ~/.zfunc/_ultraudit
@@ -80,7 +81,12 @@ pub struct RunArgs {
     pub output_dir: PathBuf,
 
     /// User-level prompt/practice home.
-    #[arg(long, value_name = "DIR", default_value = "~/.ultraudit")]
+    #[arg(
+        long,
+        value_name = "DIR",
+        default_value = "~/.ultraudit",
+        env = "ULTRAUDIT_PATH"
+    )]
     pub prompt_home: PathBuf,
 
     /// Prompt pack name.
@@ -123,9 +129,13 @@ pub struct RunArgs {
     #[arg(long)]
     pub allow_agent_failures: bool,
 
-    /// Validate CLI input and print the resolved plan without starting agents.
+    /// Run the full audit flow with fake agent calls.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Validate CLI input and print the resolved plan without writing files or starting agents.
+    #[arg(long, conflicts_with = "dry_run")]
+    pub plan: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -135,7 +145,12 @@ pub struct InitArgs {
     pub project_config_dir: PathBuf,
 
     /// User-level prompt/practice home.
-    #[arg(long, value_name = "DIR", default_value = "~/.ultraudit")]
+    #[arg(
+        long,
+        value_name = "DIR",
+        default_value = "~/.ultraudit",
+        env = "ULTRAUDIT_PATH"
+    )]
     pub prompt_home: PathBuf,
 
     /// Prompt pack name to seed.

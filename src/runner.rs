@@ -158,6 +158,74 @@ pub fn run_agent(config: &AgentConfig, request: &AgentRunRequest) -> Result<Agen
     }
 }
 
+pub fn run_agent_dry_run(agent_name: &str, request: &AgentRunRequest) -> Result<AgentStepRecord> {
+    std::fs::create_dir_all(&request.raw_dir)
+        .with_context(|| format!("create {}", request.raw_dir.display()))?;
+
+    let prompt_path = request.raw_dir.join("prompt.md");
+    let stdout_path = request.raw_dir.join("stdout.log");
+    let stderr_path = request.raw_dir.join("stderr.log");
+    let invocation_path = request.raw_dir.join("invocation.yaml");
+    let command_path = request.raw_dir.join("command.txt");
+    let exit_path = request.raw_dir.join("exit.json");
+
+    write_text(&prompt_path, &request.prompt)?;
+
+    let invocation = AgentInvocationManifest {
+        step_id: request.step_id.clone(),
+        role: request.role.clone(),
+        kind: "dry-run".to_owned(),
+        program: PathBuf::from("ultraudit-dry-run"),
+        args: vec![
+            "--agent".to_owned(),
+            agent_name.to_owned(),
+            "--step".to_owned(),
+            request.step_id.clone(),
+        ],
+        cwd: request.cwd.clone(),
+        prompt_transport: "none".to_owned(),
+        timeout_seconds: 0,
+        prompt_path,
+        stdout_path: stdout_path.clone(),
+        stderr_path: stderr_path.clone(),
+        report_path: request.report_path.clone(),
+        findings_path: request.findings_path.clone(),
+        notes_path: request.notes_path.clone(),
+    };
+
+    write_text(
+        &command_path,
+        command_display(&invocation.program, &invocation.args),
+    )?;
+    write_json_yaml(&invocation_path, &invocation)?;
+    write_text(
+        &stdout_path,
+        format!(
+            "dry-run: skipped agent `{agent_name}` for step `{}`\n",
+            request.step_id
+        ),
+    )?;
+    write_text(&stderr_path, "")?;
+    write_text(
+        &request.notes_path,
+        format!(
+            "# Reviewer Notes\n\nDry-run mode skipped real agent execution for step `{}`.\n",
+            request.step_id
+        ),
+    )?;
+
+    let exit = AgentExit {
+        success: true,
+        exit_code: Some(0),
+        timed_out: false,
+        duration_ms: 0,
+        error: None,
+    };
+    write_json_yaml(&exit_path, &exit)?;
+
+    Ok(AgentStepRecord { invocation, exit })
+}
+
 fn build_invocation(
     config: &AgentConfig,
     request: &AgentRunRequest,

@@ -8,7 +8,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::{
     cli::{Lens, Optic, RunArgs},
-    config::{find_project_config, load_agent_config, load_project_config},
+    config::{find_project_config, load_agent_config, load_project_config, AgentConfig},
     intake::{
         collect_repository_context, domain_map_markdown, domain_markdown, infer_domains,
         repository_markdown, write_repository_artifacts,
@@ -21,7 +21,7 @@ use crate::{
         ensure_default_pack, pack_root, read_pack_text, render_template, seed_default_pack,
         snapshot_pack, Pack,
     },
-    runner::{run_agent, AgentRunRequest},
+    runner::{run_agent, run_agent_dry_run, AgentRunRequest},
     util::{
         copy_dir_recursive, now_run_id, read_optional, resolve_path, sanitize_id, truncate_chars,
         write_json_yaml, write_text, write_text_if_absent,
@@ -157,6 +157,7 @@ pub fn execute_audit(args: &RunArgs) -> Result<RunSummary> {
         selected_optics: plan.optics.clone(),
         requested_domains: plan.domains.clone(),
         previous_runs: plan.previous_runs.clone(),
+        dry_run: plan.dry_run,
         allow_agent_failures: plan.allow_agent_failures,
     };
     write_json_yaml(&run_dir.join("run.yaml"), &manifest)?;
@@ -166,9 +167,19 @@ pub fn execute_audit(args: &RunArgs) -> Result<RunSummary> {
     let repository_context = repository_markdown(&repository);
     let domains = infer_domains(&repository, &plan.domains);
 
-    let agent = load_agent_config(&plan.agent, plan.config.as_deref(), &plan.repository)?;
+    let mode = if plan.dry_run {
+        RunnerMode::DryRun {
+            agent_name: plan.agent.clone(),
+        }
+    } else {
+        RunnerMode::Real(load_agent_config(
+            &plan.agent,
+            plan.config.as_deref(),
+            &plan.repository,
+        )?)
+    };
     let mut runner = StepRunner {
-        agent,
+        mode,
         repository: plan.repository.clone(),
         run_dir: run_dir.clone(),
         allow_failure: plan.allow_agent_failures,
@@ -297,6 +308,7 @@ pub fn execute_audit(args: &RunArgs) -> Result<RunSummary> {
             .collect(),
         lenses: plan.lenses,
         optics: plan.optics,
+        dry_run: plan.dry_run,
         steps: runner.steps,
     };
     write_json_yaml(&summary.run_dir.join("summary.yaml"), &summary)?;
@@ -305,12 +317,17 @@ pub fn execute_audit(args: &RunArgs) -> Result<RunSummary> {
 }
 
 struct StepRunner {
-    agent: crate::config::AgentConfig,
+    mode: RunnerMode,
     repository: PathBuf,
     run_dir: PathBuf,
     allow_failure: bool,
     counter: usize,
     steps: Vec<AgentStepRecord>,
+}
+
+enum RunnerMode {
+    Real(AgentConfig),
+    DryRun { agent_name: String },
 }
 
 impl StepRunner {
@@ -337,7 +354,10 @@ impl StepRunner {
             notes_path,
             allow_failure: self.allow_failure,
         };
-        let record = run_agent(&self.agent, &request)?;
+        let record = match &self.mode {
+            RunnerMode::Real(agent) => run_agent(agent, &request)?,
+            RunnerMode::DryRun { agent_name } => run_agent_dry_run(agent_name, &request)?,
+        };
         ensure_step_outputs(&record)?;
         self.steps.push(record.clone());
         Ok(record)

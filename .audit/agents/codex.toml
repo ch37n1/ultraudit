@@ -1,0 +1,7 @@
+kind = "codex-cli"
+binary = "codex"
+mode = "exec"
+prompt_transport = "stdin"
+approval_policy = "never"
+sandbox = "workspace-write"
+timeout_seconds = 7200

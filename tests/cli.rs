@@ -28,12 +28,12 @@ fn version_comes_from_cargo_metadata() {
 }
 
 #[test]
-fn dry_run_prints_a_text_plan() {
+fn plan_prints_a_text_plan() {
     let mut cmd = Command::cargo_bin("ultraudit").unwrap();
 
     cmd.args([
         "run",
-        "--dry-run",
+        "--plan",
         "--pack",
         "full",
         "--lens",
@@ -52,20 +52,29 @@ fn dry_run_prints_a_text_plan() {
 }
 
 #[test]
-fn dry_run_can_emit_json() {
+fn plan_can_emit_json() {
     let mut cmd = Command::cargo_bin("ultraudit").unwrap();
 
-    cmd.args([
-        "--format",
-        "json",
-        "run",
-        "--dry-run",
-        "--pack",
-        "production",
-    ])
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("\"pack\": \"production\""));
+    cmd.args(["--format", "json", "run", "--plan", "--pack", "production"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"pack\": \"production\""));
+}
+
+#[test]
+fn plan_uses_ultraudit_path_for_prompt_home() {
+    let workspace = temp_workspace("env");
+    let prompt_home = workspace.join("for-test");
+    let mut cmd = Command::cargo_bin("ultraudit").unwrap();
+
+    cmd.env("ULTRAUDIT_PATH", &prompt_home)
+        .args(["--format", "json", "run", "--plan"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "\"prompt_home\": \"{}\"",
+            prompt_home.display()
+        )));
 }
 
 #[test]
@@ -172,6 +181,70 @@ command = "mkdir -p $(dirname {{ report_path_sh }}) $(dirname {{ findings_path_s
     assert!(run_dir
         .join("prompt-pack/lenses/architecture/practices.md")
         .exists());
+}
+
+#[test]
+fn dry_run_executes_full_flow_without_real_agent() {
+    let workspace = temp_workspace("dry-run");
+    let repo = workspace.join("repo");
+    let seed_config_dir = workspace.join("seed/.audit");
+    let prompt_home = workspace.join("for-test");
+    let output_dir = workspace.join("runs");
+
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"sample\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn sample() -> bool { true }\n",
+    )
+    .unwrap();
+
+    let mut init = Command::cargo_bin("ultraudit").unwrap();
+    init.arg("init")
+        .arg("--project-config-dir")
+        .arg(&seed_config_dir)
+        .arg("--prompt-home")
+        .arg(&prompt_home)
+        .assert()
+        .success();
+
+    let mut cmd = Command::cargo_bin("ultraudit").unwrap();
+    cmd.env("ULTRAUDIT_PATH", &prompt_home)
+        .arg("run")
+        .arg("--repo")
+        .arg(&repo)
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .arg("--dry-run")
+        .arg("--agent")
+        .arg("missing-agent")
+        .arg("--lens")
+        .arg("architecture")
+        .arg("--domain")
+        .arg("core")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("audit complete"))
+        .stdout(predicate::str::contains("dry-run"));
+
+    let run_dir = newest_run_dir(&output_dir);
+    assert!(run_dir.join("run.yaml").exists());
+    assert!(run_dir.join("summary.yaml").exists());
+    assert!(run_dir.join("domain-map.yaml").exists());
+    assert!(run_dir.join("raw/001-domain-discovery/prompt.md").exists());
+    assert!(run_dir.join("reports/final-report.md").exists());
+
+    let invocation =
+        fs::read_to_string(run_dir.join("raw/001-domain-discovery/invocation.yaml")).unwrap();
+    assert!(invocation.contains("\"kind\": \"dry-run\""));
+    assert!(invocation.contains("\"missing-agent\""));
+
+    let exit = fs::read_to_string(run_dir.join("raw/001-domain-discovery/exit.json")).unwrap();
+    assert!(exit.contains("\"success\": true"));
 }
 
 fn temp_workspace(name: &str) -> PathBuf {

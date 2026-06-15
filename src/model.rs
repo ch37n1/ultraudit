@@ -44,6 +44,7 @@ pub struct RunManifest {
     pub selected_optics: Vec<String>,
     pub requested_domains: Vec<String>,
     pub previous_runs: Vec<PathBuf>,
+    pub dry_run: bool,
     pub allow_agent_failures: bool,
 }
 
@@ -131,5 +132,6 @@ pub struct RunSummary {
     pub domains: Vec<String>,
     pub lenses: Vec<String>,
     pub optics: Vec<String>,
+    pub dry_run: bool,
     pub steps: Vec<AgentStepRecord>,
 }

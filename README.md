@@ -16,11 +16,15 @@ Typical commands:
 ```bash
 cargo run -- init
 cargo run -- run --pack full
+cargo run -- run --plan --pack production
 cargo run -- run --dry-run --pack production
+ULTRAUDIT_PATH=./for-test ultraudit run --dry-run
 cargo run -- run --agent codex --lens security --domain auth
 ```
 
 The default `codex` agent uses a typed Codex CLI invocation. Unknown agents can be configured as shell-template runners under `.audit/agents/`. The `nice-practices` optic exists as a v1 placeholder only; it intentionally contains no substantive personal practices yet.
+
+`ULTRAUDIT_PATH` overrides the default prompt/practice home (`~/.ultraudit`). `run --plan` only prints the resolved plan. `run --dry-run` writes normal run artifacts while faking every agent call, which is intended for automated end-to-end tests.
 
 ## Documentation
 

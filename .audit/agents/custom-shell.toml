@@ -1,0 +1,5 @@
+kind = "shell-template"
+shell = "sh"
+prompt_transport = "stdin"
+timeout_seconds = 7200
+command = "printf 'custom-shell agent is not configured\n' >&2; exit 2"
