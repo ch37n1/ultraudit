@@ -51,7 +51,7 @@ Research these Ultraudit lenses:
 14. ux-product
 15. ml-ai
 
-Also produce stack-specific practice material where useful:
+Also produce stack-specific and application-archetype-specific practice material where useful. These tracks are subordinate to the lenses: they exist to prevent abstract, one-size-fits-all advice.
 
 - general application review
 - Rust
@@ -59,10 +59,41 @@ Also produce stack-specific practice material where useful:
 - async/concurrent systems
 - backend APIs
 - web frontend
+- mobile applications
+- desktop applications
 - databases and migrations
 - distributed systems
 - AI/RAG/agentic systems
 - deployment and operations
+
+## Coverage Guardrails, Not Priorities
+
+The following topics are not the main themes of the whole research and must not displace the full lens-by-lens work. They are guardrails: known areas that must not be missed while every lens still receives deep coverage.
+
+The expected shape is:
+
+```text
+lens -> subtopics -> application archetype variations -> practice atoms -> prompt guidance
+```
+
+1. **Domain-Driven Design as an architecture sub-optic**
+   - Research DDD as part of the `architecture` lens, not as a replacement for architecture research overall.
+   - Cover bounded contexts, ubiquitous language, aggregates, entities, value objects, domain services, repositories, application services, domain events, anti-corruption layers, context mapping, transaction boundaries, modular monoliths, microservices boundaries, and common DDD failure modes.
+   - Pay attention to how DDD practices translate into code review signals: misplaced business logic, anemic domain models, leaky infrastructure concerns, unclear ownership, invalid aggregate boundaries, cross-context coupling, and inconsistent domain language.
+
+2. **Application archetype variations**
+   - For each lens, consider whether the practice changes materially across application types.
+   - At minimum, check web applications, backend services/APIs, mobile applications, CLI tools, desktop applications, data-intensive systems, and ML/AI systems.
+   - Do not force every archetype into every lens if it is not relevant. When it is relevant, capture the variation explicitly.
+
+3. **Web and backend practice depth**
+   - Web development and backend development need dedicated source-backed material because their review signals differ from generic engineering practice.
+   - Web coverage should include frontend architecture, component boundaries, state management, accessibility, browser security, client/server contracts, performance, error states, empty states, form behavior, progressive enhancement where relevant, build tooling, and test strategy.
+   - Backend coverage should include API design, service boundaries, authentication and authorization, input validation, persistence, transactions, concurrency, background jobs, migrations, observability, reliability, deployment, and operational failure modes.
+
+4. **ML / AI system practice depth**
+   - Research ML, RAG, and agentic system review as both an application-archetype track and part of the `ml-ai` lens.
+   - Cover evals, dataset quality, data leakage, prompt injection, tool safety, retrieval quality, hallucination risk, fallback behavior, cost/latency budgets, PII exposure, reproducibility, monitoring, drift, human approval gates, and vendor/model dependency risks.
 
 ## Output Directory
 
@@ -93,10 +124,22 @@ research/
     async-concurrent.md
     backend-api.md
     web-frontend.md
+    mobile-apps.md
+    desktop-apps.md
     database.md
     distributed-systems.md
     ai-rag-agents.md
     operations.md
+  architecture-patterns/
+    domain-driven-design.md
+  archetypes/
+    web-applications.md
+    backend-services.md
+    mobile-applications.md
+    cli-tools.md
+    desktop-applications.md
+    data-intensive-systems.md
+    ml-ai-systems.md
   integration/
     lens-boundaries.md
     severity-model.md
@@ -180,6 +223,10 @@ Create a short scope statement:
 ### 2. Split Lens Into Subtopics
 
 Create a subtopic taxonomy before collecting final practices.
+
+For each lens, also identify application-archetype variations where the review practice changes. Avoid purely abstract engineering advice. For example, testing, security, performance, observability, and UX/product review look different for web applications, backend services, mobile applications, CLI tools, desktop applications, and ML/AI systems.
+
+For the `architecture` lens, Domain-Driven Design must be included explicitly as one important subtopic cluster. Do not reduce DDD to a short mention, but also do not let it replace broader architecture topics such as dependency direction, modularity, coupling, ownership, extensibility, layering, integration boundaries, and deployment architecture.
 
 Example for security:
 
@@ -359,6 +406,12 @@ A lens is not complete until:
 - prompt guidance exists;
 - recent sources were checked where the field changes quickly;
 - weak areas are listed explicitly in `research-gaps.md`.
+
+Additional mandatory completion requirements:
+
+- The `architecture` lens is not complete until Domain-Driven Design has dedicated source coverage, practice atoms, review questions, anti-patterns, and prompt guidance, while still preserving broad architecture coverage.
+- The stack/archetype-specific material is not complete until web applications, backend services, mobile applications, CLI tools, and ML/AI systems each have dedicated source-backed practice notes where their review signals differ from generic practice.
+- The `ml-ai` lens is not complete until it covers both classical ML system review concerns and modern LLM/RAG/agentic-system concerns.
 
 ## Integration Pass
 
@@ -575,4 +628,3 @@ At the end, provide:
 4. the strongest prompt guidance patterns for reviewer agents;
 5. the biggest risks for Ultraudit if these practices are used poorly;
 6. exact paths to the generated files.
-
