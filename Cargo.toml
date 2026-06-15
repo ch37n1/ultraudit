@@ -15,6 +15,7 @@ clap_complete = "4.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing-subscriber = { version = "0.3", features = ["ansi", "env-filter", "fmt"] }
+wait-timeout = "0.2"
 
 [dev-dependencies]
 assert_cmd = "2.0"
