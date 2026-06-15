@@ -159,9 +159,9 @@ Outputs:
 - `domain-map.md`;
 - `domain-map.yaml`.
 
-### 3. Domain Lens Reviews
+### 3. Domain Lens And Optic Reviews
 
-For each domain, Ultraudit runs a set of lens reviews.
+For each domain, Ultraudit runs a set of lens reviews and every enabled supplemental optic review from the selected pack.
 
 Agent task framing:
 
@@ -169,7 +169,7 @@ Agent task framing:
 
 Each run should produce:
 
-- markdown report for the domain and lens;
+- markdown report for the domain and lens/optic;
 - structured findings;
 - reviewer notes: what was inspected, which hypotheses were checked, where confidence was limited, and which files were key.
 
@@ -287,10 +287,13 @@ The final agent does not run another broad audit. Its job is to check the qualit
 
 ### Supplemental Optics
 
-Core lenses remain the stable taxonomy for findings and packs. Supplemental optics are opt-in checks that use the same evidence-first contract, but are not included in the `full` pack by default until they have enough dry-run evidence and an acceptable false-positive rate.
+Core lenses remain the stable taxonomy for findings and packs. Supplemental optics use the same evidence-first contract, but do not become part of the stable lens taxonomy. A normal run should include every supplemental optic defined by the selected pack version, including `Nice Practices`; the `--optic` flag is for focused runs of one supplemental optic or a narrow set of optics.
 
 1. **Documentation / Knowledge**
    Documentation as an operational knowledge system: source of truth, lifecycle, ownership, discoverability, onboarding routes, runbook quality, stale or conflicting docs, and links between docs and delivery, incident, and release flows. This should not become a writing-style review: a finding needs operational, onboarding, support, safety, compliance, or delivery impact.
+
+2. **Nice Practices**
+   A personal optic for practices the Ultraudit owner consciously wants to preserve and carry across projects. This is not a claim of universal best practice: a practice may be taste-driven, stack-specific, product-specific, process-oriented, or architectural as long as it is explicitly labeled as a personal preference and is not disguised as a general risk. Findings from this optic should explain which local practice is being violated, why it matters for the current project, and what trade-off it carries.
 
 ### Stack And Language Overlays
 
@@ -305,7 +308,7 @@ Stack overlays do not replace lenses and should not create a separate global lan
 
 ## Lens Packs
 
-The CLI should support named packs:
+The CLI should support named packs for core lenses. Supplemental optics from the selected pack version run by default together with the selected pack unless project-local config explicitly disables a specific optic:
 
 ```yaml
 packs:
@@ -358,6 +361,7 @@ ultraudit run --pack production
 ultraudit run --lens performance --lens security
 ultraudit run --domain auth --pack default
 ultraudit run --optic documentation-knowledge
+ultraudit run --optic nice-practices
 ```
 
 ## Finding Contract
@@ -551,6 +555,10 @@ Project-local config may select a pack and version, but should not be the only p
               optic.toml
               prompt.md
               practices.md
+            nice-practices/
+              optic.toml
+              prompt.md
+              practices.md
           atoms/
             rust-async-blocking.yaml
           suggestions/
@@ -580,7 +588,7 @@ Lens, overlay, and optic files have different responsibilities:
 
 - `lenses/` define the stable finding taxonomy and the risk perspective;
 - `overlays/` add stack-specific failure modes, evidence signals, and false-positive checks;
-- `optics/` define opt-in supplemental checks that are not part of the default/full pack until proven useful;
+- `optics/` define supplemental checks that are not part of the stable lens taxonomy, but are included in default runs unless explicitly disabled;
 - `prompts/` define reusable templates and task instructions;
 - `atoms/` may hold structured practice atoms for cases where machine-readable selection is useful.
 
@@ -702,8 +710,9 @@ Research on review practices is already an input to implementation. The next ste
 
 - Create the first `~/.ultraudit/packs/ultraudit-default/versions/0.1.0` structure.
 - Convert research results into initial lenses, overlays, optics, and practice atoms.
+- Create the `nice-practices` optic with a minimal prompt placeholder and no substantive preferred practices yet.
 - Prepare base prompts: reviewer, domain discovery, domain synthesis, system synthesis, previous-run comparison, final editor.
-- Define `pack.toml`, schema version, supported lenses, overlays, and default/full pack selection.
+- Define `pack.toml`, schema version, supported lenses, overlays, supplemental optics, and default/full pack selection.
 - Record source-backed assumptions, research gaps, and refresh triggers.
 
 ### Phase 2: CLI Orchestrator
@@ -723,10 +732,10 @@ Research on review practices is already an input to implementation. The next ste
 - `domain-map.md` and `domain-map.yaml`.
 - Basic schema validation.
 
-### Phase 4: Lens Reviews
+### Phase 4: Lens And Optic Reviews
 
-- Default lens pack from the resolved `~/.ultraudit` version directory.
-- Per-domain/per-lens agent runs.
+- Default lens pack and all enabled supplemental optics from the resolved `~/.ultraudit` version directory.
+- Per-domain/per-lens and per-domain/per-optic agent runs.
 - Structured findings extraction.
 - Raw process artifacts.
 
@@ -747,11 +756,12 @@ Research on review practices is already an input to implementation. The next ste
 
 - Save improvement suggestions.
 - Add explicit approval flow.
+- Fill `nice-practices` with real preferred practices as the final first-version step, after the base run flow and approval flow already work.
 - Create a new version directory for the accepted prompt/practice pack.
 
 ## Researched Practices Layer
 
-The practices layer should be assembled from source-backed lens packs, stack overlays, and opt-in supplemental optics. Research artifacts live outside the binary and should preserve:
+The practices layer should be assembled from source-backed lens packs, stack overlays, and supplemental optics. Research artifacts live outside the binary and should preserve:
 
 - source maps and coverage matrices;
 - practice atoms;
@@ -775,9 +785,10 @@ Baseline areas:
 - dependency and supply-chain risk;
 - frontend UX/accessibility review;
 - ML/AI system evaluation, prompt injection, evals, and model monitoring;
-- agentic tool safety, approval boundaries, and auditability.
+- agentic tool safety, approval boundaries, and auditability;
 - language-specific review guidance for Rust, Python, TypeScript, HTML/CSS, Swift, and Kotlin;
-- documentation/knowledge review guidance as a supplemental optic.
+- documentation/knowledge review guidance as a supplemental optic;
+- Nice Practices as a personal supplemental optic for project-derived preferences that should remain explicit rather than being promoted to universal rules.
 
 ## Success Criteria
 
