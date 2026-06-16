@@ -4,7 +4,7 @@
 
 ## Проблема текущей реализации
 
-Сейчас `ultraudit init` смешивает несколько ответственностей:
+Сейчас `uat init` смешивает несколько ответственностей:
 
 - создает проектный `.audit/`;
 - создает пользовательский `~/.ultraudit`;
@@ -276,7 +276,7 @@ repo/packs/0.2.0
 Путь установки binary нужно выбрать явно. Предпочтительный вариант:
 
 ```text
-~/.local/bin/ultraudit
+~/.local/bin/uat
 ```
 
 Если `~/.local/bin` отсутствует в `PATH`, `make install` должен вывести post-install инструкцию.
@@ -311,7 +311,7 @@ disabled_optics = []
 3. Добавить `Makefile` с целью `install`.
 4. В `make install`:
    - выполнить `cargo build --release`;
-   - установить `target/release/ultraudit` в `~/.local/bin/ultraudit` или другой выбранный user bin;
+   - установить `target/release/uat` в `~/.local/bin/uat` или другой выбранный user bin;
    - создать `~/.ultraudit/packs`;
    - скопировать `packs/0.2.0` в `~/.ultraudit/packs/0.2.0`;
    - проверить `command -v codex`;
@@ -340,8 +340,8 @@ disabled_optics = []
    - compiled prompts остаются в `raw/*/prompt.md`.
 11. Обновить README:
    - `make install`
-   - `ultraudit init`
-   - `ultraudit run --pack default`
+   - `uat init`
+   - `uat run --pack default`
 
 ## Tests
 
@@ -352,8 +352,8 @@ disabled_optics = []
 - `make install` копирует `packs/0.2.0` в выбранный `ULTRAUDIT_PATH` или `~/.ultraudit`;
 - `make install` проверяет доступность `codex`;
 - installed files совпадают с checked-in pack assets;
-- `ultraudit init` не требует `.local/research`;
-- `ultraudit run --plan` или `run --dry-run` резолвит `~/.ultraudit/packs/0.2.0`;
+- `uat init` не требует `.local/research`;
+- `uat run --plan` или `run --dry-run` резолвит `~/.ultraudit/packs/0.2.0`;
 - compiled prompt для domain-lens task содержит полный guide выбранной линзы;
 - `documentation-knowledge` не запускается per-domain по умолчанию;
 - cross-system review не запускает `code-quality` по умолчанию;
@@ -365,11 +365,11 @@ disabled_optics = []
 
 ```bash
 make install
-ultraudit init
-ultraudit run --plan
+uat init
+uat run --plan
 ```
 
-После `make install` команда `ultraudit` должна быть доступна из shell, а `~/.ultraudit/packs/0.2.0` должен содержать копию Git-tracked pack-а.
+После `make install` команда `uat` должна быть доступна из shell, а `~/.ultraudit/packs/0.2.0` должен содержать копию Git-tracked pack-а.
 
 Runtime prompt для domain-lens task должен быть self-contained и включать полный curated guide выбранной линзы/оптики, task context, domain/project map и output contract.
 

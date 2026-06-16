@@ -6,22 +6,23 @@ use serde::Serialize;
 const LONG_HELP: &str = "\
 EXAMPLES:
     make install
-    ultraudit init
-    ultraudit run --pack full
-    ultraudit run --pack production --domain auth
-    ultraudit run --lens security --lens correctness
-    ultraudit run --optic documentation-knowledge
-    ultraudit run --agent codex --prompt-home ~/.ultraudit
-    ULTRAUDIT_PATH=./for-test ultraudit run --dry-run
-    ultraudit run --plan --pack default
+    uat init
+    uat run --pack full
+    uat run --pack production --domain auth
+    uat run --lens security --lens correctness
+    uat run --optic documentation-knowledge
+    uat run --agent codex --prompt-home ~/.ultraudit
+    ULTRAUDIT_PATH=./for-test uat run --dry-run
+    uat run --plan --pack default
 
 COMPLETIONS:
-    ultraudit completions zsh > ~/.zfunc/_ultraudit
-    ultraudit completions bash > ~/.local/share/bash-completion/completions/ultraudit
+    uat completions zsh > ~/.zfunc/_uat
+    uat completions bash > ~/.local/share/bash-completion/completions/uat
 ";
 
 #[derive(Debug, clap::Parser)]
 #[command(
+    name = "uat",
     version,
     about,
     author,

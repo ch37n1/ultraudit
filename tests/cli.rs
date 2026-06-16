@@ -9,18 +9,19 @@ use std::{
 
 #[test]
 fn help_lists_core_commands() {
-    let mut cmd = Command::cargo_bin("ultraudit").unwrap();
+    let mut cmd = Command::cargo_bin("uat").unwrap();
 
     cmd.arg("--help")
         .assert()
         .success()
+        .stdout(predicate::str::contains("Usage: uat"))
         .stdout(predicate::str::contains("run"))
         .stdout(predicate::str::contains("completions"));
 }
 
 #[test]
 fn version_comes_from_cargo_metadata() {
-    let mut cmd = Command::cargo_bin("ultraudit").unwrap();
+    let mut cmd = Command::cargo_bin("uat").unwrap();
 
     cmd.arg("--version")
         .assert()
@@ -30,7 +31,7 @@ fn version_comes_from_cargo_metadata() {
 
 #[test]
 fn plan_prints_a_text_plan() {
-    let mut cmd = Command::cargo_bin("ultraudit").unwrap();
+    let mut cmd = Command::cargo_bin("uat").unwrap();
 
     cmd.args([
         "run",
@@ -54,7 +55,7 @@ fn plan_prints_a_text_plan() {
 
 #[test]
 fn plan_can_emit_json() {
-    let mut cmd = Command::cargo_bin("ultraudit").unwrap();
+    let mut cmd = Command::cargo_bin("uat").unwrap();
 
     cmd.args(["--format", "json", "run", "--plan", "--pack", "production"])
         .assert()
@@ -67,7 +68,7 @@ fn plan_uses_ultraudit_path_for_prompt_home() {
     let workspace = temp_workspace("env");
     let prompt_home = workspace.join("for-test");
     let pack_source = prompt_home.join("packs/0.2.0");
-    let mut cmd = Command::cargo_bin("ultraudit").unwrap();
+    let mut cmd = Command::cargo_bin("uat").unwrap();
 
     cmd.env("ULTRAUDIT_PATH", &prompt_home)
         .args(["--format", "json", "run", "--plan"])
@@ -85,12 +86,12 @@ fn plan_uses_ultraudit_path_for_prompt_home() {
 
 #[test]
 fn completions_can_be_generated() {
-    let mut cmd = Command::cargo_bin("ultraudit").unwrap();
+    let mut cmd = Command::cargo_bin("uat").unwrap();
 
     cmd.args(["completions", "bash"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("_ultraudit"));
+        .stdout(predicate::str::contains("_uat"));
 }
 
 #[test]
@@ -99,7 +100,7 @@ fn init_writes_project_config_without_seeding_pack() {
     let project_config_dir = workspace.join("repo/.audit");
     let prompt_home = workspace.join("home");
 
-    let mut cmd = Command::cargo_bin("ultraudit").unwrap();
+    let mut cmd = Command::cargo_bin("uat").unwrap();
     cmd.arg("init")
         .arg("--project-config-dir")
         .arg(&project_config_dir)
@@ -139,7 +140,7 @@ fn run_executes_full_flow_with_shell_template_agent() {
     )
     .unwrap();
 
-    let mut init = Command::cargo_bin("ultraudit").unwrap();
+    let mut init = Command::cargo_bin("uat").unwrap();
     init.arg("init")
         .arg("--project-config-dir")
         .arg(&project_config_dir)
@@ -160,7 +161,7 @@ command = "mkdir -p $(dirname {{ report_path_sh }}) $(dirname {{ findings_path_s
     )
     .unwrap();
 
-    let mut cmd = Command::cargo_bin("ultraudit").unwrap();
+    let mut cmd = Command::cargo_bin("uat").unwrap();
     cmd.arg("run")
         .arg("--repo")
         .arg(&repo)
@@ -230,7 +231,7 @@ fn codex_cli_agent_uses_current_codex_exec_flags() {
     permissions.set_mode(0o755);
     fs::set_permissions(&fake_codex, permissions).unwrap();
 
-    let mut init = Command::cargo_bin("ultraudit").unwrap();
+    let mut init = Command::cargo_bin("uat").unwrap();
     init.arg("init")
         .arg("--project-config-dir")
         .arg(&project_config_dir)
@@ -256,7 +257,7 @@ timeout_seconds = 30
     )
     .unwrap();
 
-    let mut cmd = Command::cargo_bin("ultraudit").unwrap();
+    let mut cmd = Command::cargo_bin("uat").unwrap();
     cmd.arg("run")
         .arg("--repo")
         .arg(&repo)
@@ -302,7 +303,7 @@ fn dry_run_executes_full_flow_without_real_agent() {
     )
     .unwrap();
 
-    let mut init = Command::cargo_bin("ultraudit").unwrap();
+    let mut init = Command::cargo_bin("uat").unwrap();
     init.arg("init")
         .arg("--project-config-dir")
         .arg(&seed_config_dir)
@@ -312,7 +313,7 @@ fn dry_run_executes_full_flow_without_real_agent() {
         .success();
     install_test_pack(&prompt_home);
 
-    let mut cmd = Command::cargo_bin("ultraudit").unwrap();
+    let mut cmd = Command::cargo_bin("uat").unwrap();
     cmd.env("ULTRAUDIT_PATH", &prompt_home)
         .arg("run")
         .arg("--repo")
@@ -367,7 +368,7 @@ fn run_fails_with_make_install_hint_when_pack_is_missing() {
     )
     .unwrap();
 
-    let mut cmd = Command::cargo_bin("ultraudit").unwrap();
+    let mut cmd = Command::cargo_bin("uat").unwrap();
     cmd.env("ULTRAUDIT_PATH", &prompt_home)
         .arg("run")
         .arg("--repo")
@@ -404,7 +405,7 @@ fn default_flow_runs_project_optics_once_and_excludes_code_quality_from_cross_sy
     )
     .unwrap();
 
-    let mut init = Command::cargo_bin("ultraudit").unwrap();
+    let mut init = Command::cargo_bin("uat").unwrap();
     init.arg("init")
         .arg("--project-config-dir")
         .arg(&project_config_dir)
@@ -414,7 +415,7 @@ fn default_flow_runs_project_optics_once_and_excludes_code_quality_from_cross_sy
         .success();
     install_test_pack(&prompt_home);
 
-    let mut cmd = Command::cargo_bin("ultraudit").unwrap();
+    let mut cmd = Command::cargo_bin("uat").unwrap();
     cmd.env("ULTRAUDIT_PATH", &prompt_home)
         .arg("run")
         .arg("--repo")
@@ -459,7 +460,8 @@ fn makefile_install_target_installs_binary_pack_and_checks_codex() {
         .expect("Makefile should exist");
 
     assert!(makefile.contains("cargo build --release"));
-    assert!(makefile.contains("target/release/ultraudit"));
+    assert!(makefile.contains("target/release/uat"));
+    assert!(makefile.contains("$(INSTALL_BIN)/uat"));
     assert!(makefile.contains("packs/$(PACK_VERSION)"));
     assert!(makefile.contains("command -v codex"));
 }

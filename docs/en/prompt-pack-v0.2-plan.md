@@ -4,7 +4,7 @@ This document defines a separate implementation pass for reworking prompts and p
 
 ## Current Problem
 
-Today `ultraudit init` mixes several responsibilities:
+Today `uat init` mixes several responsibilities:
 
 - creates the project-local `.audit/` directory;
 - creates the user-level `~/.ultraudit` directory;
@@ -276,7 +276,7 @@ to:
 Choose the binary install path explicitly. Preferred path:
 
 ```text
-~/.local/bin/ultraudit
+~/.local/bin/uat
 ```
 
 If `~/.local/bin` is not in `PATH`, `make install` should print a post-install instruction.
@@ -311,7 +311,7 @@ Remove `name = "ultraudit-default"` from the new configuration, or keep it only 
 3. Add a `Makefile` with an `install` target.
 4. In `make install`:
    - run `cargo build --release`;
-   - install `target/release/ultraudit` to `~/.local/bin/ultraudit` or another chosen user bin;
+   - install `target/release/uat` to `~/.local/bin/uat` or another chosen user bin;
    - create `~/.ultraudit/packs`;
    - copy `packs/0.2.0` to `~/.ultraudit/packs/0.2.0`;
    - check `command -v codex`;
@@ -340,8 +340,8 @@ Remove `name = "ultraudit-default"` from the new configuration, or keep it only 
    - compiled prompts remain in `raw/*/prompt.md`.
 11. Update README:
    - `make install`
-   - `ultraudit init`
-   - `ultraudit run --pack default`
+   - `uat init`
+   - `uat run --pack default`
 
 ## Tests
 
@@ -352,8 +352,8 @@ Add or update tests:
 - `make install` copies `packs/0.2.0` to selected `ULTRAUDIT_PATH` or `~/.ultraudit`;
 - `make install` checks that `codex` is available;
 - installed files match checked-in pack assets;
-- `ultraudit init` does not require `.local/research`;
-- `ultraudit run --plan` or `run --dry-run` resolves `~/.ultraudit/packs/0.2.0`;
+- `uat init` does not require `.local/research`;
+- `uat run --plan` or `run --dry-run` resolves `~/.ultraudit/packs/0.2.0`;
 - compiled prompt for a domain-lens task contains the full guide for the selected lens;
 - `documentation-knowledge` does not run per-domain by default;
 - cross-system review does not run `code-quality` by default;
@@ -365,13 +365,12 @@ A fresh checkout without `.local/research` must support:
 
 ```bash
 make install
-ultraudit init
-ultraudit run --plan
+uat init
+uat run --plan
 ```
 
-After `make install`, the `ultraudit` command must be available from the shell, and `~/.ultraudit/packs/0.2.0` must contain a copy of the Git-tracked pack.
+After `make install`, the `uat` command must be available from the shell, and `~/.ultraudit/packs/0.2.0` must contain a copy of the Git-tracked pack.
 
 The runtime prompt for a domain-lens task must be self-contained and include the full curated guide for the selected lens or optic, task context, domain/project map, and output contract.
 
 The installed pack must be a copy of Git-tracked `packs/0.2.0`, not generated from Rust and not copied from raw research.
-

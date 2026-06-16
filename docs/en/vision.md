@@ -356,12 +356,12 @@ packs:
 CLI examples:
 
 ```bash
-ultraudit run --pack full
-ultraudit run --pack production
-ultraudit run --lens performance --lens security
-ultraudit run --domain auth --pack default
-ultraudit run --optic documentation-knowledge
-ultraudit run --optic nice-practices
+uat run --pack full
+uat run --pack production
+uat run --lens performance --lens security
+uat run --domain auth --pack default
+uat run --optic documentation-knowledge
+uat run --optic nice-practices
 ```
 
 ## Finding Contract

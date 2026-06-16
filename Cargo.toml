@@ -2,9 +2,14 @@
 name = "ultraudit"
 version = "0.1.0"
 edition = "2021"
+autobins = false
 description = "CLI tool for deep agentic review of applications"
 authors = ["Ultraudit contributors"]
 license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "uat"
+path = "src/main.rs"
 
 [dependencies]
 anstream = "0.6"

@@ -6,7 +6,7 @@ INSTALL_BIN ?= $(HOME)/.local/bin
 install:
 	cargo build --release
 	install -d "$(INSTALL_BIN)"
-	install -m 0755 target/release/ultraudit "$(INSTALL_BIN)/ultraudit"
+	install -m 0755 target/release/uat "$(INSTALL_BIN)/uat"
 	install -d "$(ULTRAUDIT_PATH)/packs/$(PACK_VERSION)"
 	cp -R "packs/$(PACK_VERSION)/." "$(ULTRAUDIT_PATH)/packs/$(PACK_VERSION)/"
 	@if command -v codex >/dev/null 2>&1; then \
@@ -16,7 +16,7 @@ install:
 	fi
 	@case ":$$PATH:" in \
 		*:"$(INSTALL_BIN)":*) ;; \
-		*) printf 'note: add %s to PATH to run ultraudit directly.\n' "$(INSTALL_BIN)";; \
+		*) printf 'note: add %s to PATH to run uat directly.\n' "$(INSTALL_BIN)";; \
 	esac
-	@printf 'installed ultraudit: %s/ultraudit\n' "$(INSTALL_BIN)"
+	@printf 'installed uat: %s/uat\n' "$(INSTALL_BIN)"
 	@printf 'installed prompt pack: %s/packs/%s\n' "$(ULTRAUDIT_PATH)" "$(PACK_VERSION)"
