@@ -1204,6 +1204,7 @@ fn codex_agent_template() -> &'static str {
 binary = "codex"
 mode = "exec"
 # model = "gpt-5"
+ignore_user_config = true
 prompt_transport = "stdin"
 approval_policy = "never"
 sandbox = "workspace-write"

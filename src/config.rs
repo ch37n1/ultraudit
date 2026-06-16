@@ -25,6 +25,7 @@ pub struct AgentConfig {
     pub binary: PathBuf,
     pub mode: String,
     pub model: Option<String>,
+    pub ignore_user_config: bool,
     pub prompt_transport: PromptTransport,
     pub approval_policy: String,
     pub sandbox: String,
@@ -54,6 +55,7 @@ impl AgentConfig {
             binary: PathBuf::from("codex"),
             mode: "exec".to_owned(),
             model: None,
+            ignore_user_config: true,
             prompt_transport: PromptTransport::Stdin,
             approval_policy: "never".to_owned(),
             sandbox: "workspace-write".to_owned(),
@@ -185,6 +187,7 @@ fn agent_from_toml(
             binary: PathBuf::from("sh"),
             mode: String::new(),
             model: None,
+            ignore_user_config: true,
             prompt_transport: PromptTransport::Stdin,
             approval_policy: "never".to_owned(),
             sandbox: "workspace-write".to_owned(),
@@ -211,6 +214,10 @@ fn agent_from_toml(
         .filter(|model| !model.is_empty())
     {
         config.model = Some(model.to_owned());
+    }
+    if let Some(ignore_user_config) = parsed.value(section, "ignore_user_config") {
+        config.ignore_user_config = parse_bool(ignore_user_config)
+            .with_context(|| format!("parse ignore_user_config for agent `{name}`"))?;
     }
     if let Some(prompt_transport) = parsed.value(section, "prompt_transport") {
         config.prompt_transport = parse_prompt_transport(prompt_transport)?;
@@ -262,6 +269,14 @@ fn parse_prompt_transport(value: &str) -> Result<PromptTransport> {
         "stdin" => Ok(PromptTransport::Stdin),
         "prompt-file" => Ok(PromptTransport::PromptFile),
         other => bail!("unsupported prompt transport `{other}`"),
+    }
+}
+
+fn parse_bool(value: &str) -> Result<bool> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => bail!("expected `true` or `false`, got `{other}`"),
     }
 }
 

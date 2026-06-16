@@ -135,6 +135,7 @@ fn init_writes_project_config_without_seeding_pack() {
 
     let codex_config = fs::read_to_string(project_config_dir.join("agents/codex.toml")).unwrap();
     assert!(codex_config.contains("# model = \"gpt-5\""));
+    assert!(codex_config.contains("ignore_user_config = true"));
 }
 
 #[test]
@@ -292,6 +293,112 @@ fn verbose_run_streams_agent_output_to_stderr() {
 }
 
 #[test]
+fn run_does_not_fail_on_mcp_transport_stderr_when_agent_succeeds() {
+    let setup = scripted_shell_agent_setup(
+        "mcp-stderr-success",
+        "mcp-noisy",
+        30,
+        "printf '%s\n' '2026-06-16T07:14:23.112686Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Auth(AuthorizationRequired)' >&2; mkdir -p $(dirname {{ report_path_sh }}) $(dirname {{ findings_path_sh }}) $(dirname {{ notes_path_sh }}); printf '# Agent Step\n\nok\n' > {{ report_path_sh }}; printf '[]\n' > {{ findings_path_sh }}; printf 'notes\n' > {{ notes_path_sh }}",
+    );
+
+    let mut cmd = Command::cargo_bin("uat").unwrap();
+    cmd.arg("run")
+        .arg("--repo")
+        .arg(&setup.repo)
+        .arg("--config")
+        .arg(setup.project_config_dir.join("config.toml"))
+        .arg("--prompt-home")
+        .arg(&setup.prompt_home)
+        .arg("--output-dir")
+        .arg(&setup.output_dir)
+        .arg("--agent")
+        .arg("mcp-noisy")
+        .arg("--lens")
+        .arg("architecture")
+        .arg("--domain")
+        .arg("core")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("audit complete"));
+
+    let run_dir = newest_run_dir(&setup.output_dir);
+    let raw_stderr = fs::read_to_string(run_dir.join("raw/001-domain-discovery/stderr.log"))
+        .expect("agent stderr should be logged");
+    assert!(raw_stderr.contains("Auth(AuthorizationRequired)"));
+}
+
+#[test]
+fn run_fails_when_agent_exits_nonzero() {
+    let setup = scripted_shell_agent_setup(
+        "agent-nonzero",
+        "failing",
+        30,
+        "printf '%s\n' 'agent failed intentionally' >&2; exit 2",
+    );
+
+    let mut cmd = Command::cargo_bin("uat").unwrap();
+    cmd.arg("run")
+        .arg("--repo")
+        .arg(&setup.repo)
+        .arg("--config")
+        .arg(setup.project_config_dir.join("config.toml"))
+        .arg("--prompt-home")
+        .arg(&setup.prompt_home)
+        .arg("--output-dir")
+        .arg(&setup.output_dir)
+        .arg("--agent")
+        .arg("failing")
+        .arg("--lens")
+        .arg("architecture")
+        .arg("--domain")
+        .arg("core")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "agent `failing` failed during step `001-domain-discovery`",
+        ));
+
+    let run_dir = newest_run_dir(&setup.output_dir);
+    let exit = read_exit_json(&run_dir);
+    assert_eq!(exit["success"], false);
+    assert_eq!(exit["exit_code"], 2);
+    assert_eq!(exit["timed_out"], false);
+}
+
+#[test]
+fn run_fails_when_agent_times_out_and_records_exit_metadata() {
+    let setup = scripted_shell_agent_setup("agent-timeout", "hanging", 1, "sleep 5");
+
+    let mut cmd = Command::cargo_bin("uat").unwrap();
+    cmd.arg("run")
+        .arg("--repo")
+        .arg(&setup.repo)
+        .arg("--config")
+        .arg(setup.project_config_dir.join("config.toml"))
+        .arg("--prompt-home")
+        .arg(&setup.prompt_home)
+        .arg("--output-dir")
+        .arg(&setup.output_dir)
+        .arg("--agent")
+        .arg("hanging")
+        .arg("--lens")
+        .arg("architecture")
+        .arg("--domain")
+        .arg("core")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "agent `hanging` failed during step `001-domain-discovery`",
+        ));
+
+    let run_dir = newest_run_dir(&setup.output_dir);
+    let exit = read_exit_json(&run_dir);
+    assert_eq!(exit["success"], false);
+    assert_eq!(exit["timed_out"], true);
+    assert_eq!(exit["error"], "agent timed out after 1 seconds");
+}
+
+#[test]
 fn json_run_keeps_stdout_machine_readable_and_hides_progress() {
     let setup = noisy_shell_agent_setup("json-output");
 
@@ -408,7 +515,7 @@ timeout_seconds = 30
     let args = fs::read_to_string(recorded_args).unwrap();
     assert_eq!(
         args,
-        "--ask-for-approval\nnever\n--sandbox\nworkspace-write\n--model\ngpt-5-codex\nexec\n"
+        "--ask-for-approval\nnever\n--sandbox\nworkspace-write\n--model\ngpt-5-codex\nexec\n--ignore-user-config\n"
     );
 }
 
@@ -615,6 +722,20 @@ struct ShellAgentSetup {
 }
 
 fn noisy_shell_agent_setup(name: &str) -> ShellAgentSetup {
+    scripted_shell_agent_setup(
+        name,
+        "noisy",
+        30,
+        "printf 'agent %s marker\n' stdout; printf 'agent %s marker\n' stderr >&2; mkdir -p $(dirname {{ report_path_sh }}) $(dirname {{ findings_path_sh }}) $(dirname {{ notes_path_sh }}); printf '# Agent Step\n\nok\n' > {{ report_path_sh }}; printf '[]\n' > {{ findings_path_sh }}; printf 'notes\n' > {{ notes_path_sh }}",
+    )
+}
+
+fn scripted_shell_agent_setup(
+    name: &str,
+    agent_name: &str,
+    timeout_seconds: u64,
+    command: &str,
+) -> ShellAgentSetup {
     let workspace = temp_workspace(name);
     let repo = workspace.join("repo");
     let project_config_dir = repo.join(".audit");
@@ -644,13 +765,16 @@ fn noisy_shell_agent_setup(name: &str) -> ShellAgentSetup {
     install_test_pack(&prompt_home);
 
     fs::write(
-        project_config_dir.join("agents/noisy.toml"),
-        r#"kind = "shell-template"
+        project_config_dir.join(format!("agents/{agent_name}.toml")),
+        format!(
+            r#"kind = "shell-template"
 shell = "sh"
 prompt_transport = "stdin"
-timeout_seconds = 30
-command = "printf 'agent %s marker\n' stdout; printf 'agent %s marker\n' stderr >&2; mkdir -p $(dirname {{ report_path_sh }}) $(dirname {{ findings_path_sh }}) $(dirname {{ notes_path_sh }}); printf '# Agent Step\n\nok\n' > {{ report_path_sh }}; printf '[]\n' > {{ findings_path_sh }}; printf 'notes\n' > {{ notes_path_sh }}"
+timeout_seconds = {timeout_seconds}
+command = "{}"
 "#,
+            toml_string(command)
+        ),
     )
     .unwrap();
 
@@ -660,6 +784,19 @@ command = "printf 'agent %s marker\n' stdout; printf 'agent %s marker\n' stderr 
         prompt_home,
         output_dir,
     }
+}
+
+fn toml_string(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
+fn read_exit_json(run_dir: &Path) -> serde_json::Value {
+    let exit = fs::read_to_string(run_dir.join("raw/001-domain-discovery/exit.json"))
+        .expect("exit metadata should be written");
+    serde_json::from_str(&exit).expect("exit metadata should be valid JSON")
 }
 
 fn newest_run_dir(output_dir: &PathBuf) -> PathBuf {

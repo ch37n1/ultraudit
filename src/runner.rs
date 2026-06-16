@@ -353,6 +353,9 @@ fn build_codex_invocation(config: &AgentConfig) -> (PathBuf, Vec<String>) {
     if !config.mode.is_empty() {
         args.push(config.mode.clone());
     }
+    if config.ignore_user_config {
+        args.push("--ignore-user-config".to_owned());
+    }
 
     (config.binary.clone(), args)
 }
