@@ -36,12 +36,40 @@ pub fn resolve_path(path: &Path, base: &Path) -> PathBuf {
 }
 
 pub fn now_run_id() -> String {
-    let seconds = SystemTime::now()
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
         .unwrap_or_default();
 
-    format!("run-{seconds}-{}", std::process::id())
+    run_id_from_unix_time(now.as_secs(), now.subsec_nanos(), std::process::id())
+}
+
+fn run_id_from_unix_time(seconds: u64, nanos: u32, process_id: u32) -> String {
+    let days = seconds / 86_400;
+    let seconds_of_day = seconds % 86_400;
+    let (year, month, day) = civil_date_from_epoch_days(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+
+    format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}-{minute:02}-{second:02}.{nanos:09}Z-run-{process_id}"
+    )
+}
+
+fn civil_date_from_epoch_days(days_since_epoch: u64) -> (i64, u64, u64) {
+    // Convert Unix epoch days to a proleptic Gregorian date using 400-year cycles.
+    let days = days_since_epoch as i64 + 719_468;
+    let era = days / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_param = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_param + 2) / 5 + 1;
+    let month = month_param + if month_param < 10 { 3 } else { -9 };
+    let year = year_of_era + era * 400 + if month <= 2 { 1 } else { 0 };
+
+    (year, month as u64, day as u64)
 }
 
 pub fn sanitize_id(value: &str) -> String {
@@ -175,4 +203,25 @@ pub fn shell_escape_os(value: &OsStr) -> String {
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_id_from_unix_time_formats_epoch_as_readable_utc_timestamp() {
+        assert_eq!(
+            run_id_from_unix_time(0, 0, 42),
+            "1970-01-01T00-00-00.000000000Z-run-42"
+        );
+    }
+
+    #[test]
+    fn run_id_from_unix_time_formats_leap_day() {
+        assert_eq!(
+            run_id_from_unix_time(951_782_400, 123_456_789, 7),
+            "2000-02-29T00-00-00.123456789Z-run-7"
+        );
+    }
 }

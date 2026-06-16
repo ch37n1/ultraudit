@@ -3,7 +3,7 @@ use predicates::prelude::*;
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -332,6 +332,7 @@ fn dry_run_executes_full_flow_without_real_agent() {
         .stdout(predicate::str::contains("dry-run"));
 
     let run_dir = newest_run_dir(&output_dir);
+    assert_readable_run_dir_name(&run_dir);
     assert!(run_dir.join("run.yaml").exists());
     assert!(run_dir.join("summary.yaml").exists());
     assert!(run_dir.join("domain-map.yaml").exists());
@@ -482,6 +483,52 @@ fn newest_run_dir(output_dir: &PathBuf) -> PathBuf {
         .collect::<Vec<_>>();
     runs.sort();
     runs.pop().unwrap()
+}
+
+fn assert_readable_run_dir_name(run_dir: &Path) {
+    let name = run_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("run directory should have a UTF-8 file name");
+
+    assert!(
+        is_datetime_run_dir_name(name),
+        "unexpected run directory name: {name}"
+    );
+}
+
+fn is_datetime_run_dir_name(name: &str) -> bool {
+    if name.len() < 36 {
+        return false;
+    }
+
+    let bytes = name.as_bytes();
+    let expected_separators = [
+        (4, b'-'),
+        (7, b'-'),
+        (10, b'T'),
+        (13, b'-'),
+        (16, b'-'),
+        (19, b'.'),
+        (29, b'Z'),
+        (30, b'-'),
+        (31, b'r'),
+        (32, b'u'),
+        (33, b'n'),
+        (34, b'-'),
+    ];
+
+    expected_separators
+        .iter()
+        .all(|(index, expected)| bytes.get(*index) == Some(expected))
+        && bytes[0..4].iter().all(u8::is_ascii_digit)
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && bytes[8..10].iter().all(u8::is_ascii_digit)
+        && bytes[11..13].iter().all(u8::is_ascii_digit)
+        && bytes[14..16].iter().all(u8::is_ascii_digit)
+        && bytes[17..19].iter().all(u8::is_ascii_digit)
+        && bytes[20..29].iter().all(u8::is_ascii_digit)
+        && bytes[35..].iter().all(u8::is_ascii_digit)
 }
 
 fn install_test_pack(prompt_home: &PathBuf) {
