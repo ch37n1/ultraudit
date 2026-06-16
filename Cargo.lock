@@ -567,6 +567,7 @@ dependencies = [
  "predicates",
  "serde",
  "serde_json",
+ "terminal_size",
  "tracing-subscriber",
  "wait-timeout",
 ]

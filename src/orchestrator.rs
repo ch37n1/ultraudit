@@ -12,6 +12,7 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Context, Result};
+use terminal_size::{terminal_size, Width};
 
 use crate::{
     cli::{Lens, Optic, RunArgs},
@@ -783,24 +784,27 @@ impl StepActivity {
                 match receiver.recv_timeout(Duration::from_millis(250)) {
                     Ok(success) => {
                         let status = if success { "done" } else { "failed" };
-                        anstream::eprint!(
-                            "\r\x1b[2K{status} [{current}/{total}] {role} ({step_id}) in {}\n",
-                            format_duration(started.elapsed())
+                        let line = spinner_status_line(
+                            status,
+                            current,
+                            total,
+                            &role,
+                            &step_id,
+                            format_duration(started.elapsed()),
                         );
-                        let _ = io::stderr().flush();
+                        write_spinner_line(&line, true);
                         break;
                     }
                     Err(RecvTimeoutError::Timeout) => {
-                        anstream::eprint!(
-                            "\r{} [{}/{}] {} ({}) running {}",
+                        let line = spinner_status_line(
                             frames[frame % frames.len()],
                             current,
                             total,
-                            role,
-                            step_id,
-                            format_duration(started.elapsed())
+                            &role,
+                            &step_id,
+                            format_duration(started.elapsed()),
                         );
-                        let _ = io::stderr().flush();
+                        write_spinner_line(&line, false);
                         frame += 1;
                     }
                     Err(RecvTimeoutError::Disconnected) => break,
@@ -830,6 +834,63 @@ impl StepActivity {
             );
         }
     }
+}
+
+fn spinner_status_line(
+    status: &str,
+    current: usize,
+    total: usize,
+    role: &str,
+    step_id: &str,
+    elapsed: String,
+) -> String {
+    let line = if matches!(status, "-" | "\\" | "|" | "/") {
+        format!("{status} [{current}/{total}] {role} ({step_id}) running {elapsed}")
+    } else {
+        format!("{status} [{current}/{total}] {role} ({step_id}) in {elapsed}")
+    };
+    fit_spinner_line(&line, spinner_line_width())
+}
+
+fn write_spinner_line(line: &str, newline: bool) {
+    let mut stderr = io::stderr().lock();
+    let _ = write!(stderr, "\r\x1b[2K{line}");
+    if newline {
+        let _ = stderr.write_all(b"\n");
+    }
+    let _ = stderr.flush();
+}
+
+fn spinner_line_width() -> usize {
+    terminal_size()
+        .map(|(Width(width), _)| usize::from(width))
+        .filter(|width| *width > 0)
+        .unwrap_or(80)
+}
+
+fn fit_spinner_line(line: &str, terminal_width: usize) -> String {
+    let max_width = terminal_width.saturating_sub(1);
+    if max_width == 0 {
+        return String::new();
+    }
+
+    let chars = line.chars().collect::<Vec<_>>();
+    if chars.len() <= max_width {
+        return line.to_owned();
+    }
+
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+
+    let keep = max_width - 3;
+    let head_len = keep * 2 / 3;
+    let tail_len = keep - head_len;
+
+    let mut fitted = chars.iter().take(head_len).copied().collect::<String>();
+    fitted.push_str("...");
+    fitted.extend(chars.iter().skip(chars.len() - tail_len).copied());
+    fitted
 }
 
 struct SpinnerThread {
@@ -1678,4 +1739,34 @@ prompt_transport = "stdin"
 timeout_seconds = 7200
 command = "printf 'custom-shell agent is not configured\n' >&2; exit 2"
 "#
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    #[test]
+    fn fit_spinner_line_leaves_room_for_carriage_return_update() {
+        let line = "- [14/71] dependency-supply-chain lens review (014-docs-dependency-supply-chain) running 12.3s";
+
+        let fitted = fit_spinner_line(line, 60);
+
+        assert!(
+            fitted.chars().count() <= 59,
+            "spinner line should not reach the terminal wrap column: {fitted}"
+        );
+    }
+
+    #[test]
+    fn fit_spinner_line_preserves_short_status_lines() {
+        let line = "- [15/71] ux-product lens review (015-docs-ux-product) running 4.0s";
+
+        assert_eq!(fit_spinner_line(line, 120), line);
+    }
+
+    #[test]
+    fn fit_spinner_line_handles_tiny_terminal_widths() {
+        assert_eq!(fit_spinner_line("abcdef", 1), "");
+        assert_eq!(fit_spinner_line("abcdef", 4), "...");
+    }
 }
