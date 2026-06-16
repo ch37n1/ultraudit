@@ -1,14 +1,17 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::mpsc::{self, RecvTimeoutError, Sender},
+    sync::{
+        mpsc::{self, RecvTimeoutError, Sender},
+        Arc,
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 
 use crate::{
     cli::{Lens, Optic, RunArgs},
@@ -78,6 +81,8 @@ pub fn build_audit_plan(args: &RunArgs) -> Result<AuditPlan> {
         previous_runs,
         dry_run: args.dry_run,
         allow_agent_failures: args.allow_agent_failures,
+        jobs: args.jobs,
+        retries: args.retries,
     })
 }
 
@@ -166,6 +171,8 @@ pub fn execute_audit(args: &RunArgs, options: AuditExecutionOptions) -> Result<R
         previous_runs: plan.previous_runs.clone(),
         dry_run: plan.dry_run,
         allow_agent_failures: plan.allow_agent_failures,
+        jobs: plan.jobs,
+        retries: plan.retries,
     };
     write_json_yaml(&run_dir.join("run.yaml"), &manifest)?;
 
@@ -173,6 +180,7 @@ pub fn execute_audit(args: &RunArgs, options: AuditExecutionOptions) -> Result<R
     let (repository_md_path, _) = write_repository_artifacts(&run_dir, &repository)?;
     let repository_context = repository_markdown(&repository);
     let domains = infer_domains(&repository, &plan.domains);
+    validate_unique_domain_ids(&domains)?;
     let domain_map_context = domain_map_markdown(&domains);
     let selected_lenses = lenses_from_ids(&plan.lenses);
     let selected_optics = optics_from_ids(&plan.optics);
@@ -182,11 +190,17 @@ pub fn execute_audit(args: &RunArgs, options: AuditExecutionOptions) -> Result<R
             agent_name: plan.agent.clone(),
         }
     } else {
-        RunnerMode::Real(Box::new(load_agent_config(
+        RunnerMode::Real(Arc::new(load_agent_config(
             &plan.agent,
             plan.config.as_deref(),
             &plan.repository,
         )?))
+    };
+    let progress_display = if plan.jobs > 1 && matches!(options.progress, ProgressDisplay::Spinner)
+    {
+        ProgressDisplay::Lines
+    } else {
+        options.progress
     };
     let mut runner = StepRunner {
         mode,
@@ -194,10 +208,11 @@ pub fn execute_audit(args: &RunArgs, options: AuditExecutionOptions) -> Result<R
         run_dir: run_dir.clone(),
         allow_failure: plan.allow_agent_failures,
         progress: RunProgress {
-            display: options.progress,
+            display: progress_display,
             total: total_step_count(&domains, &selected_lenses, &selected_optics),
         },
         verbose_agent_output: options.verbose_agent_output,
+        retries: plan.retries,
         counter: 0,
         steps: Vec::new(),
     };
@@ -212,86 +227,17 @@ pub fn execute_audit(args: &RunArgs, options: AuditExecutionOptions) -> Result<R
         &domains,
     )?;
 
-    let mut domain_review_reports = BTreeMap::<String, Vec<PathBuf>>::new();
-    let mut all_findings = Vec::new();
+    let job_context = Arc::new(AuditJobContext {
+        pack: pack.clone(),
+        base_reviewer_guidance: base_reviewer_guidance.clone(),
+        repository_context: repository_context.clone(),
+        domain_map_context: domain_map_context.clone(),
+        previous_runs: plan.previous_runs.clone(),
+    });
+    let planned_jobs = plan_audit_jobs(&mut runner, &domains, &selected_lenses, &selected_optics)?;
+    let final_report = planned_jobs.final_report.clone();
 
-    for domain in &domains {
-        for lens in &selected_lenses {
-            let (report, findings) = run_lens_review(
-                &mut runner,
-                &pack,
-                &base_reviewer_guidance,
-                &repository_context,
-                &domain_map_context,
-                domain,
-                *lens,
-            )?;
-            domain_review_reports
-                .entry(domain.domain_id.clone())
-                .or_default()
-                .push(report);
-            all_findings.push(findings);
-        }
-    }
-
-    for optic in &selected_optics {
-        let (_report, findings) = run_project_optic_review(
-            &mut runner,
-            &pack,
-            &base_reviewer_guidance,
-            &repository_context,
-            &domain_map_context,
-            *optic,
-        )?;
-        all_findings.push(findings);
-    }
-
-    let cross_system_findings = run_cross_system_review(
-        &mut runner,
-        &pack,
-        &base_reviewer_guidance,
-        &repository_context,
-        &domain_map_context,
-    )?;
-    all_findings.push(cross_system_findings);
-
-    let mut domain_synthesis_reports = Vec::new();
-    for domain in &domains {
-        let report = run_domain_synthesis(
-            &mut runner,
-            &pack,
-            &base_reviewer_guidance,
-            domain,
-            domain_review_reports
-                .get(&domain.domain_id)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]),
-        )?;
-        domain_synthesis_reports.push(report);
-    }
-
-    let system_report = run_system_synthesis(
-        &mut runner,
-        &pack,
-        &base_reviewer_guidance,
-        &repository_context,
-        &domain_synthesis_reports,
-    )?;
-    let previous_report = run_previous_runs_comparison(
-        &mut runner,
-        &pack,
-        &base_reviewer_guidance,
-        &all_findings,
-        &plan.previous_runs,
-    )?;
-    let final_report = run_final_editor(
-        &mut runner,
-        &pack,
-        &base_reviewer_guidance,
-        &system_report,
-        &domain_synthesis_reports,
-        &previous_report,
-    )?;
+    runner.run_jobs(job_context, planned_jobs.jobs, plan.jobs)?;
 
     ensure_final_report(&run_dir, &manifest, &domains, &final_report)?;
     write_text_if_absent(
@@ -320,6 +266,8 @@ pub fn execute_audit(args: &RunArgs, options: AuditExecutionOptions) -> Result<R
         lenses: plan.lenses,
         optics: plan.optics,
         dry_run: plan.dry_run,
+        jobs: plan.jobs,
+        retries: plan.retries,
         steps: runner.steps,
     };
     write_json_yaml(&summary.run_dir.join("summary.yaml"), &summary)?;
@@ -334,16 +282,40 @@ struct StepRunner {
     allow_failure: bool,
     progress: RunProgress,
     verbose_agent_output: bool,
+    retries: u8,
     counter: usize,
     steps: Vec<AgentStepRecord>,
 }
 
+#[derive(Clone)]
 enum RunnerMode {
-    Real(Box<AgentConfig>),
+    Real(Arc<AgentConfig>),
     DryRun { agent_name: String },
 }
 
 impl StepRunner {
+    fn plan_step(
+        &mut self,
+        slug: &str,
+        role: &str,
+        report_path: PathBuf,
+        findings_path: PathBuf,
+    ) -> PlannedStep {
+        self.counter += 1;
+        let step_id = format!("{:03}-{}", self.counter, sanitize_id(slug));
+        let raw_dir = self.run_dir.join("raw").join(&step_id);
+        let notes_path = raw_dir.join("reviewer-notes.md");
+        PlannedStep {
+            ordinal: self.counter,
+            step_id,
+            role: role.to_owned(),
+            raw_dir,
+            report_path,
+            findings_path,
+            notes_path,
+        }
+    }
+
     fn run(
         &mut self,
         slug: &str,
@@ -352,47 +324,408 @@ impl StepRunner {
         report_path: PathBuf,
         findings_path: PathBuf,
     ) -> Result<AgentStepRecord> {
-        self.counter += 1;
-        let step_id = format!("{:03}-{}", self.counter, sanitize_id(slug));
-        let raw_dir = self.run_dir.join("raw").join(&step_id);
-        let notes_path = raw_dir.join("reviewer-notes.md");
+        let planned = self.plan_step(slug, role, report_path, findings_path);
+        let record = self.executor().run_prompt(&planned, prompt)?;
+        self.steps.push(record.clone());
+        Ok(record)
+    }
+
+    fn run_jobs(
+        &mut self,
+        context: Arc<AuditJobContext>,
+        jobs: Vec<StepJob>,
+        max_jobs: usize,
+    ) -> Result<()> {
+        validate_unique_job_paths(&jobs)?;
+
+        let records = run_job_graph(self.executor(), context, jobs, max_jobs)?;
+        self.steps.extend(records);
+        Ok(())
+    }
+
+    fn executor(&self) -> StepExecutor {
+        StepExecutor {
+            mode: self.mode.clone(),
+            repository: self.repository.clone(),
+            allow_failure: self.allow_failure,
+            progress: self.progress,
+            verbose_agent_output: self.verbose_agent_output,
+            retries: self.retries,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PlannedStep {
+    ordinal: usize,
+    step_id: String,
+    role: String,
+    raw_dir: PathBuf,
+    report_path: PathBuf,
+    findings_path: PathBuf,
+    notes_path: PathBuf,
+}
+
+#[derive(Clone)]
+struct StepExecutor {
+    mode: RunnerMode,
+    repository: PathBuf,
+    allow_failure: bool,
+    progress: RunProgress,
+    verbose_agent_output: bool,
+    retries: u8,
+}
+
+impl StepExecutor {
+    fn run_prompt(&self, planned: &PlannedStep, prompt: String) -> Result<AgentStepRecord> {
         let request = AgentRunRequest {
-            step_id,
-            role: role.to_owned(),
+            step_id: planned.step_id.clone(),
+            role: planned.role.clone(),
             cwd: self.repository.clone(),
             prompt,
-            raw_dir,
-            report_path,
-            findings_path,
-            notes_path,
+            raw_dir: planned.raw_dir.clone(),
+            report_path: planned.report_path.clone(),
+            findings_path: planned.findings_path.clone(),
+            notes_path: planned.notes_path.clone(),
             allow_failure: self.allow_failure,
         };
         let activity = self
             .progress
-            .step_started(self.counter, &request.step_id, role);
-        let record = match &self.mode {
+            .step_started(planned.ordinal, &request.step_id, &planned.role);
+        let attempts = usize::from(self.retries) + 1;
+        let mut last_error = None;
+
+        for attempt in 1..=attempts {
+            match self.run_attempt(&request) {
+                Ok(record) if record.exit.success || attempt == attempts => {
+                    let output_result = ensure_step_outputs(&record);
+                    activity.finish(record.exit.success && output_result.is_ok());
+                    output_result?;
+                    return Ok(record);
+                }
+                Ok(record) => {
+                    last_error = record.exit.error.clone().map(anyhow::Error::msg);
+                }
+                Err(error) if attempt == attempts => {
+                    activity.finish(false);
+                    return Err(error);
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                }
+            }
+        }
+
+        activity.finish(false);
+        Err(last_error.unwrap_or_else(|| anyhow!("agent step failed")))
+    }
+
+    fn run_attempt(&self, request: &AgentRunRequest) -> Result<AgentStepRecord> {
+        match &self.mode {
             RunnerMode::Real(agent) => run_agent(
                 agent,
-                &request,
+                request,
                 AgentRunOptions {
                     live_output: self.verbose_agent_output,
                 },
             ),
-            RunnerMode::DryRun { agent_name } => run_agent_dry_run(agent_name, &request),
-        };
-        let record = match record {
-            Ok(record) => record,
-            Err(error) => {
-                activity.finish(false);
-                return Err(error);
-            }
-        };
-        let output_result = ensure_step_outputs(&record);
-        activity.finish(record.exit.success && output_result.is_ok());
-        output_result?;
-        self.steps.push(record.clone());
-        Ok(record)
+            RunnerMode::DryRun { agent_name } => run_agent_dry_run(agent_name, request),
+        }
     }
+}
+
+#[derive(Debug, Clone)]
+struct StepJob {
+    id: usize,
+    dependencies: Vec<usize>,
+    planned: PlannedStep,
+    kind: StepJobKind,
+}
+
+#[derive(Debug, Clone)]
+enum StepJobKind {
+    LensReview {
+        domain: Domain,
+        lens: Lens,
+    },
+    ProjectOpticReview {
+        optic: Optic,
+    },
+    CrossSystemReview,
+    DomainSynthesis {
+        domain: Domain,
+        review_reports: Vec<PathBuf>,
+    },
+    SystemSynthesis {
+        domain_synthesis_reports: Vec<PathBuf>,
+    },
+    PreviousRunsComparison {
+        current_findings: Vec<PathBuf>,
+    },
+    FinalEditor {
+        system_report: PathBuf,
+        domain_synthesis_reports: Vec<PathBuf>,
+        previous_report: PathBuf,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct AuditJobContext {
+    pack: Pack,
+    base_reviewer_guidance: String,
+    repository_context: String,
+    domain_map_context: String,
+    previous_runs: Vec<PathBuf>,
+}
+
+struct PlannedAuditJobs {
+    jobs: Vec<StepJob>,
+    final_report: PathBuf,
+}
+
+struct JobCompletion {
+    job_id: usize,
+    result: Result<AgentStepRecord>,
+}
+
+fn run_job_graph(
+    executor: StepExecutor,
+    context: Arc<AuditJobContext>,
+    jobs: Vec<StepJob>,
+    max_jobs: usize,
+) -> Result<Vec<AgentStepRecord>> {
+    if jobs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let job_count = jobs.len();
+    let mut remaining_dependencies = vec![0_usize; job_count];
+    let mut dependents = vec![Vec::<usize>::new(); job_count];
+    for (index, job) in jobs.iter().enumerate() {
+        if job.id != index {
+            bail!("internal scheduler error: job ids are not contiguous");
+        }
+        remaining_dependencies[job.id] = job.dependencies.len();
+        for dependency in &job.dependencies {
+            if *dependency >= job_count {
+                bail!(
+                    "internal scheduler error: job `{}` depends on unknown job `{dependency}`",
+                    job.planned.step_id
+                );
+            }
+            dependents[*dependency].push(job.id);
+        }
+    }
+
+    let mut ready = VecDeque::new();
+    for job in &jobs {
+        if remaining_dependencies[job.id] == 0 {
+            push_ready_job(&mut ready, job.id, &jobs);
+        }
+    }
+
+    let (sender, receiver) = mpsc::channel::<JobCompletion>();
+    let max_jobs = max_jobs.max(1);
+    let mut records = vec![None; job_count];
+    let mut running = 0_usize;
+    let mut completed = 0_usize;
+    let mut first_error = None;
+
+    while completed < job_count {
+        while running < max_jobs && first_error.is_none() {
+            let Some(job_id) = ready.pop_front() else {
+                break;
+            };
+            spawn_step_job(
+                executor.clone(),
+                Arc::clone(&context),
+                jobs[job_id].clone(),
+                sender.clone(),
+            );
+            running += 1;
+        }
+
+        if running == 0 {
+            break;
+        }
+
+        let completion = receiver
+            .recv()
+            .context("receive completed audit job from worker")?;
+        running -= 1;
+        completed += 1;
+
+        match completion.result {
+            Ok(record) => {
+                records[completion.job_id] = Some(record);
+                for dependent in &dependents[completion.job_id] {
+                    remaining_dependencies[*dependent] -= 1;
+                    if remaining_dependencies[*dependent] == 0 {
+                        push_ready_job(&mut ready, *dependent, &jobs);
+                    }
+                }
+            }
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+
+        if first_error.is_some() && running == 0 {
+            break;
+        }
+    }
+
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+
+    if completed != job_count {
+        bail!("audit job graph stalled before all dependencies were satisfied");
+    }
+
+    let mut ordered_records = Vec::with_capacity(job_count);
+    for job in &jobs {
+        let Some(record) = records[job.id].take() else {
+            bail!(
+                "internal scheduler error: job `{}` completed without a record",
+                job.planned.step_id
+            );
+        };
+        ordered_records.push(record);
+    }
+    Ok(ordered_records)
+}
+
+fn push_ready_job(ready: &mut VecDeque<usize>, job_id: usize, jobs: &[StepJob]) {
+    let ordinal = jobs[job_id].planned.ordinal;
+    let position = ready
+        .iter()
+        .position(|existing| jobs[*existing].planned.ordinal > ordinal)
+        .unwrap_or(ready.len());
+    ready.insert(position, job_id);
+}
+
+fn spawn_step_job(
+    executor: StepExecutor,
+    context: Arc<AuditJobContext>,
+    job: StepJob,
+    sender: Sender<JobCompletion>,
+) {
+    thread::spawn(move || {
+        let job_id = job.id;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            execute_step_job(&executor, &context, &job)
+        }))
+        .unwrap_or_else(|_| Err(anyhow!("audit job worker panicked")));
+        let _ = sender.send(JobCompletion { job_id, result });
+    });
+}
+
+fn execute_step_job(
+    executor: &StepExecutor,
+    context: &AuditJobContext,
+    job: &StepJob,
+) -> Result<AgentStepRecord> {
+    match &job.kind {
+        StepJobKind::LensReview { domain, lens } => {
+            let prompt = build_lens_review_prompt(context, &job.planned, domain, *lens)?;
+            let record = executor.run_prompt(&job.planned, prompt)?;
+            ensure_review_report(
+                &job.planned.report_path,
+                &format!("{} / {}", domain.name, lens.title()),
+            )?;
+            ensure_empty_findings(&job.planned.findings_path)?;
+            Ok(record)
+        }
+        StepJobKind::ProjectOpticReview { optic } => {
+            let prompt = build_project_optic_review_prompt(context, &job.planned, *optic)?;
+            let record = executor.run_prompt(&job.planned, prompt)?;
+            ensure_review_report(
+                &job.planned.report_path,
+                &format!("{} Project Optic", optic.title()),
+            )?;
+            ensure_empty_findings(&job.planned.findings_path)?;
+            Ok(record)
+        }
+        StepJobKind::CrossSystemReview => {
+            let prompt = build_cross_system_review_prompt(context, &job.planned)?;
+            let record = executor.run_prompt(&job.planned, prompt)?;
+            ensure_review_report(&job.planned.report_path, "Cross-System Review")?;
+            ensure_empty_findings(&job.planned.findings_path)?;
+            Ok(record)
+        }
+        StepJobKind::DomainSynthesis {
+            domain,
+            review_reports,
+        } => {
+            let prompt =
+                build_domain_synthesis_prompt(context, &job.planned, domain, review_reports)?;
+            let record = executor.run_prompt(&job.planned, prompt)?;
+            ensure_review_report(
+                &job.planned.report_path,
+                &format!("{} Synthesis", domain.name),
+            )?;
+            ensure_empty_findings(&job.planned.findings_path)?;
+            Ok(record)
+        }
+        StepJobKind::SystemSynthesis {
+            domain_synthesis_reports,
+        } => {
+            let prompt =
+                build_system_synthesis_prompt(context, &job.planned, domain_synthesis_reports)?;
+            let record = executor.run_prompt(&job.planned, prompt)?;
+            ensure_review_report(&job.planned.report_path, "System Review")?;
+            ensure_empty_findings(&job.planned.findings_path)?;
+            Ok(record)
+        }
+        StepJobKind::PreviousRunsComparison { current_findings } => {
+            let prompt =
+                build_previous_runs_comparison_prompt(context, &job.planned, current_findings)?;
+            let record = executor.run_prompt(&job.planned, prompt)?;
+            ensure_review_report(&job.planned.report_path, "Previous Runs Comparison")?;
+            ensure_empty_findings(&job.planned.findings_path)?;
+            Ok(record)
+        }
+        StepJobKind::FinalEditor {
+            system_report,
+            domain_synthesis_reports,
+            previous_report,
+        } => {
+            let prompt = build_final_editor_prompt(
+                context,
+                &job.planned,
+                system_report,
+                domain_synthesis_reports,
+                previous_report,
+            )?;
+            let record = executor.run_prompt(&job.planned, prompt)?;
+            ensure_empty_findings(&job.planned.findings_path)?;
+            Ok(record)
+        }
+    }
+}
+
+fn validate_unique_job_paths(jobs: &[StepJob]) -> Result<()> {
+    let mut seen = BTreeMap::<PathBuf, String>::new();
+    for job in jobs {
+        for path in [
+            &job.planned.raw_dir,
+            &job.planned.report_path,
+            &job.planned.findings_path,
+            &job.planned.notes_path,
+        ] {
+            if let Some(existing) = seen.insert(path.clone(), job.planned.step_id.clone()) {
+                bail!(
+                    "planned audit jobs `{existing}` and `{}` would write the same path {}",
+                    job.planned.step_id,
+                    path.display()
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -520,6 +853,434 @@ fn format_duration(duration: Duration) -> String {
     }
 }
 
+fn plan_audit_jobs(
+    runner: &mut StepRunner,
+    domains: &[Domain],
+    selected_lenses: &[Lens],
+    selected_optics: &[Optic],
+) -> Result<PlannedAuditJobs> {
+    let mut jobs = Vec::new();
+    let mut domain_review_reports = BTreeMap::<String, Vec<PathBuf>>::new();
+    let mut domain_review_job_ids = BTreeMap::<String, Vec<usize>>::new();
+    let mut review_job_ids = Vec::new();
+    let mut all_findings = Vec::new();
+
+    for domain in domains {
+        for lens in selected_lenses {
+            let report_path = runner.run_dir.join("reports/lenses").join(format!(
+                "{}.{}.md",
+                domain.domain_id,
+                lens.as_str()
+            ));
+            let findings_path = runner.run_dir.join("findings").join(format!(
+                "{}.{}.yaml",
+                domain.domain_id,
+                lens.as_str()
+            ));
+            let planned = runner.plan_step(
+                &format!("{}-{}", domain.domain_id, lens.as_str()),
+                &format!("{} lens review", lens.as_str()),
+                report_path.clone(),
+                findings_path.clone(),
+            );
+            let job_id = jobs.len();
+            jobs.push(StepJob {
+                id: job_id,
+                dependencies: Vec::new(),
+                planned,
+                kind: StepJobKind::LensReview {
+                    domain: domain.clone(),
+                    lens: *lens,
+                },
+            });
+            domain_review_reports
+                .entry(domain.domain_id.clone())
+                .or_default()
+                .push(report_path);
+            domain_review_job_ids
+                .entry(domain.domain_id.clone())
+                .or_default()
+                .push(job_id);
+            review_job_ids.push(job_id);
+            all_findings.push(findings_path);
+        }
+    }
+
+    for optic in selected_optics {
+        let report_path = runner
+            .run_dir
+            .join("reports/optics")
+            .join(format!("{}.md", optic.as_str()));
+        let findings_path = runner
+            .run_dir
+            .join("findings")
+            .join(format!("{}.yaml", optic.as_str()));
+        let planned = runner.plan_step(
+            optic.as_str(),
+            &format!("{} project optic review", optic.as_str()),
+            report_path,
+            findings_path.clone(),
+        );
+        let job_id = jobs.len();
+        jobs.push(StepJob {
+            id: job_id,
+            dependencies: Vec::new(),
+            planned,
+            kind: StepJobKind::ProjectOpticReview { optic: *optic },
+        });
+        review_job_ids.push(job_id);
+        all_findings.push(findings_path);
+    }
+
+    let cross_system_report = runner.run_dir.join("reports/cross-system.md");
+    let cross_system_findings = runner.run_dir.join("findings/cross-system.yaml");
+    let cross_system_job_id = jobs.len();
+    jobs.push(StepJob {
+        id: cross_system_job_id,
+        dependencies: Vec::new(),
+        planned: runner.plan_step(
+            "cross-system",
+            "cross-system review",
+            cross_system_report,
+            cross_system_findings.clone(),
+        ),
+        kind: StepJobKind::CrossSystemReview,
+    });
+    review_job_ids.push(cross_system_job_id);
+    all_findings.push(cross_system_findings);
+
+    let mut domain_synthesis_reports = Vec::new();
+    let mut domain_synthesis_job_ids = Vec::new();
+    for domain in domains {
+        let report_path = runner
+            .run_dir
+            .join("reports/domains")
+            .join(format!("{}.md", domain.domain_id));
+        let findings_path = runner
+            .run_dir
+            .join("findings")
+            .join(format!("{}.synthesis.yaml", domain.domain_id));
+        let dependencies = domain_review_job_ids
+            .get(&domain.domain_id)
+            .cloned()
+            .unwrap_or_default();
+        let review_reports = domain_review_reports
+            .get(&domain.domain_id)
+            .cloned()
+            .unwrap_or_default();
+        let planned = runner.plan_step(
+            &format!("{}-synthesis", domain.domain_id),
+            "domain synthesis",
+            report_path.clone(),
+            findings_path,
+        );
+        let job_id = jobs.len();
+        jobs.push(StepJob {
+            id: job_id,
+            dependencies,
+            planned,
+            kind: StepJobKind::DomainSynthesis {
+                domain: domain.clone(),
+                review_reports,
+            },
+        });
+        domain_synthesis_reports.push(report_path);
+        domain_synthesis_job_ids.push(job_id);
+    }
+
+    let system_report = runner.run_dir.join("reports/system-review.md");
+    let system_findings = runner.run_dir.join("findings/system.yaml");
+    let mut system_dependencies = domain_synthesis_job_ids.clone();
+    system_dependencies.push(cross_system_job_id);
+    let system_job_id = jobs.len();
+    jobs.push(StepJob {
+        id: system_job_id,
+        dependencies: system_dependencies,
+        planned: runner.plan_step(
+            "system-synthesis",
+            "system synthesis",
+            system_report.clone(),
+            system_findings,
+        ),
+        kind: StepJobKind::SystemSynthesis {
+            domain_synthesis_reports: domain_synthesis_reports.clone(),
+        },
+    });
+
+    let previous_report = runner.run_dir.join("reports/previous-runs-comparison.md");
+    let previous_findings = runner
+        .run_dir
+        .join("findings/previous-runs-comparison.yaml");
+    let previous_job_id = jobs.len();
+    jobs.push(StepJob {
+        id: previous_job_id,
+        dependencies: review_job_ids,
+        planned: runner.plan_step(
+            "previous-runs-comparison",
+            "previous runs comparison",
+            previous_report.clone(),
+            previous_findings,
+        ),
+        kind: StepJobKind::PreviousRunsComparison {
+            current_findings: all_findings,
+        },
+    });
+
+    let final_report = runner.run_dir.join("reports/final-report.md");
+    let final_findings = runner.run_dir.join("findings/final.yaml");
+    let mut final_dependencies = domain_synthesis_job_ids;
+    final_dependencies.push(system_job_id);
+    final_dependencies.push(previous_job_id);
+    jobs.push(StepJob {
+        id: jobs.len(),
+        dependencies: final_dependencies,
+        planned: runner.plan_step(
+            "final-editor",
+            "final editorial verification",
+            final_report.clone(),
+            final_findings,
+        ),
+        kind: StepJobKind::FinalEditor {
+            system_report,
+            domain_synthesis_reports: domain_synthesis_reports.clone(),
+            previous_report,
+        },
+    });
+
+    Ok(PlannedAuditJobs { jobs, final_report })
+}
+
+fn build_lens_review_prompt(
+    context: &AuditJobContext,
+    planned: &PlannedStep,
+    domain: &Domain,
+    lens: Lens,
+) -> Result<String> {
+    let output_paths = output_paths(
+        &planned.report_path,
+        &planned.findings_path,
+        "reviewer notes in raw dir",
+    );
+    let template = read_pack_text(&context.pack.prompt("domain-lens-review"))?;
+    let lens_prompt = read_pack_text(&context.pack.lens_prompt(lens))?;
+    let practices = read_pack_text(&context.pack.lens_practices(lens))?;
+    let evidence = read_pack_text(&context.pack.lens_evidence(lens))?;
+    let false_positives = read_pack_text(&context.pack.lens_false_positives(lens))?;
+    let integration = integration_context(&context.pack)?;
+    let domain_context = domain_markdown(domain);
+    Ok(render_template(
+        &template,
+        &map_values([
+            (
+                "base_reviewer_guidance",
+                context.base_reviewer_guidance.as_str(),
+            ),
+            ("lens_prompt", &lens_prompt),
+            ("repository_context", context.repository_context.as_str()),
+            ("domain_context", &domain_context),
+            ("domain_map", context.domain_map_context.as_str()),
+            ("domain_id", &domain.domain_id),
+            ("domain_name", &domain.name),
+            ("lens_id", lens.as_str()),
+            ("lens_practices", &practices),
+            ("lens_evidence", &evidence),
+            ("lens_false_positives", &false_positives),
+            ("integration_context", &integration),
+            ("output_paths", &output_paths),
+        ]),
+    ))
+}
+
+fn build_project_optic_review_prompt(
+    context: &AuditJobContext,
+    planned: &PlannedStep,
+    optic: Optic,
+) -> Result<String> {
+    let output_paths = output_paths(
+        &planned.report_path,
+        &planned.findings_path,
+        "reviewer notes in raw dir",
+    );
+    let template = read_pack_text(&context.pack.prompt("project-optic-review"))?;
+    let optic_prompt = read_pack_text(&context.pack.optic_prompt(optic))?;
+    let practices = read_pack_text(&context.pack.optic_practices(optic))?;
+    let evidence = read_pack_text(&context.pack.optic_evidence(optic))?;
+    let false_positives = read_pack_text(&context.pack.optic_false_positives(optic))?;
+    let integration = integration_context(&context.pack)?;
+    Ok(render_template(
+        &template,
+        &map_values([
+            (
+                "base_reviewer_guidance",
+                context.base_reviewer_guidance.as_str(),
+            ),
+            ("optic_prompt", &optic_prompt),
+            ("repository_context", context.repository_context.as_str()),
+            ("domain_map", context.domain_map_context.as_str()),
+            ("optic_id", optic.as_str()),
+            ("optic_practices", &practices),
+            ("optic_evidence", &evidence),
+            ("optic_false_positives", &false_positives),
+            ("integration_context", &integration),
+            ("output_paths", &output_paths),
+        ]),
+    ))
+}
+
+fn build_cross_system_review_prompt(
+    context: &AuditJobContext,
+    planned: &PlannedStep,
+) -> Result<String> {
+    let output_paths = output_paths(
+        &planned.report_path,
+        &planned.findings_path,
+        "reviewer notes in raw dir",
+    );
+    let template = read_pack_text(&context.pack.prompt("cross-system-review"))?;
+    let integration = integration_context(&context.pack)?;
+    let cross_system_lenses = cross_system_lenses();
+    Ok(render_template(
+        &template,
+        &map_values([
+            (
+                "base_reviewer_guidance",
+                context.base_reviewer_guidance.as_str(),
+            ),
+            ("repository_context", context.repository_context.as_str()),
+            ("domain_map", context.domain_map_context.as_str()),
+            ("integration_context", &integration),
+            ("cross_system_lenses", &cross_system_lenses),
+            ("output_paths", &output_paths),
+        ]),
+    ))
+}
+
+fn build_domain_synthesis_prompt(
+    context: &AuditJobContext,
+    planned: &PlannedStep,
+    domain: &Domain,
+    review_reports: &[PathBuf],
+) -> Result<String> {
+    let domain_findings = read_paths(review_reports, 40_000)?;
+    let domain_context = domain_markdown(domain);
+    let output_paths = output_paths(
+        &planned.report_path,
+        &planned.findings_path,
+        "synthesis notes in raw dir",
+    );
+    let template = read_pack_text(&context.pack.prompt("domain-synthesis"))?;
+    let integration = integration_context(&context.pack)?;
+    Ok(render_template(
+        &template,
+        &map_values([
+            (
+                "base_reviewer_guidance",
+                context.base_reviewer_guidance.as_str(),
+            ),
+            ("domain_id", &domain.domain_id),
+            ("domain_name", &domain.name),
+            ("domain_context", &domain_context),
+            ("domain_findings", &domain_findings),
+            ("integration_context", &integration),
+            ("output_paths", &output_paths),
+        ]),
+    ))
+}
+
+fn build_system_synthesis_prompt(
+    context: &AuditJobContext,
+    planned: &PlannedStep,
+    domain_synthesis_reports: &[PathBuf],
+) -> Result<String> {
+    let synthesis_inputs = read_paths(domain_synthesis_reports, 80_000)?;
+    let output_paths = output_paths(
+        &planned.report_path,
+        &planned.findings_path,
+        "system synthesis notes in raw dir",
+    );
+    let template = read_pack_text(&context.pack.prompt("system-synthesis"))?;
+    let integration = integration_context(&context.pack)?;
+    Ok(render_template(
+        &template,
+        &map_values([
+            (
+                "base_reviewer_guidance",
+                context.base_reviewer_guidance.as_str(),
+            ),
+            ("repository_context", context.repository_context.as_str()),
+            ("synthesis_inputs", &synthesis_inputs),
+            ("integration_context", &integration),
+            ("output_paths", &output_paths),
+        ]),
+    ))
+}
+
+fn build_previous_runs_comparison_prompt(
+    context: &AuditJobContext,
+    planned: &PlannedStep,
+    current_findings: &[PathBuf],
+) -> Result<String> {
+    let current_findings = read_paths(current_findings, 80_000)?;
+    let previous_run_context = previous_run_context(&context.previous_runs)?;
+    let output_paths = output_paths(
+        &planned.report_path,
+        &planned.findings_path,
+        "comparison notes in raw dir",
+    );
+    let template = read_pack_text(&context.pack.prompt("previous-runs-comparison"))?;
+    let integration = integration_context(&context.pack)?;
+    Ok(render_template(
+        &template,
+        &map_values([
+            (
+                "base_reviewer_guidance",
+                context.base_reviewer_guidance.as_str(),
+            ),
+            ("current_findings", &current_findings),
+            ("previous_run_context", &previous_run_context),
+            ("integration_context", &integration),
+            ("output_paths", &output_paths),
+        ]),
+    ))
+}
+
+fn build_final_editor_prompt(
+    context: &AuditJobContext,
+    planned: &PlannedStep,
+    system_report: &Path,
+    domain_synthesis_reports: &[PathBuf],
+    previous_report: &Path,
+) -> Result<String> {
+    let mut inputs = String::new();
+    inputs.push_str(&read_optional(system_report)?.unwrap_or_default());
+    inputs.push_str("\n\n");
+    inputs.push_str(&read_paths(domain_synthesis_reports, 100_000)?);
+    inputs.push_str("\n\n");
+    inputs.push_str(&read_optional(previous_report)?.unwrap_or_default());
+    let output_paths = output_paths(
+        &planned.report_path,
+        &planned.findings_path,
+        "final editor notes in raw dir",
+    );
+    let template = read_pack_text(&context.pack.prompt("final-editor"))?;
+    let integration = integration_context(&context.pack)?;
+    let final_editor_checklist =
+        read_pack_text(&context.pack.integration("final-editor-checklist"))?;
+    Ok(render_template(
+        &template,
+        &map_values([
+            (
+                "base_reviewer_guidance",
+                context.base_reviewer_guidance.as_str(),
+            ),
+            ("final_editor_inputs", &truncate_chars(&inputs, 120_000)),
+            ("integration_context", &integration),
+            ("final_editor_checklist", &final_editor_checklist),
+            ("output_paths", &output_paths),
+        ]),
+    ))
+}
+
 fn run_domain_discovery(
     runner: &mut StepRunner,
     pack: &Pack,
@@ -563,322 +1324,6 @@ fn run_domain_discovery(
     }
 
     Ok(())
-}
-
-fn run_lens_review(
-    runner: &mut StepRunner,
-    pack: &Pack,
-    base_reviewer_guidance: &str,
-    repository_context: &str,
-    domain_map: &str,
-    domain: &Domain,
-    lens: Lens,
-) -> Result<(PathBuf, PathBuf)> {
-    let report_path = runner.run_dir.join("reports/lenses").join(format!(
-        "{}.{}.md",
-        domain.domain_id,
-        lens.as_str()
-    ));
-    let findings_path = runner.run_dir.join("findings").join(format!(
-        "{}.{}.yaml",
-        domain.domain_id,
-        lens.as_str()
-    ));
-    let output_paths = output_paths(&report_path, &findings_path, "reviewer notes in raw dir");
-    let template = read_pack_text(&pack.prompt("domain-lens-review"))?;
-    let lens_prompt = read_pack_text(&pack.lens_prompt(lens))?;
-    let practices = read_pack_text(&pack.lens_practices(lens))?;
-    let evidence = read_pack_text(&pack.lens_evidence(lens))?;
-    let false_positives = read_pack_text(&pack.lens_false_positives(lens))?;
-    let integration = integration_context(pack)?;
-    let domain_context = domain_markdown(domain);
-    let prompt = render_template(
-        &template,
-        &map_values([
-            ("base_reviewer_guidance", base_reviewer_guidance),
-            ("lens_prompt", &lens_prompt),
-            ("repository_context", repository_context),
-            ("domain_context", &domain_context),
-            ("domain_map", domain_map),
-            ("domain_id", &domain.domain_id),
-            ("domain_name", &domain.name),
-            ("lens_id", lens.as_str()),
-            ("lens_practices", &practices),
-            ("lens_evidence", &evidence),
-            ("lens_false_positives", &false_positives),
-            ("integration_context", &integration),
-            ("output_paths", &output_paths),
-        ]),
-    );
-
-    let _ = runner.run(
-        &format!("{}-{}", domain.domain_id, lens.as_str()),
-        &format!("{} lens review", lens.as_str()),
-        prompt,
-        report_path.clone(),
-        findings_path.clone(),
-    )?;
-    ensure_review_report(&report_path, &format!("{} / {}", domain.name, lens.title()))?;
-    ensure_empty_findings(&findings_path)?;
-    Ok((report_path, findings_path))
-}
-
-fn run_project_optic_review(
-    runner: &mut StepRunner,
-    pack: &Pack,
-    base_reviewer_guidance: &str,
-    repository_context: &str,
-    domain_map: &str,
-    optic: Optic,
-) -> Result<(PathBuf, PathBuf)> {
-    let report_path = runner
-        .run_dir
-        .join("reports/optics")
-        .join(format!("{}.md", optic.as_str()));
-    let findings_path = runner
-        .run_dir
-        .join("findings")
-        .join(format!("{}.yaml", optic.as_str()));
-    let output_paths = output_paths(&report_path, &findings_path, "reviewer notes in raw dir");
-    let template = read_pack_text(&pack.prompt("project-optic-review"))?;
-    let optic_prompt = read_pack_text(&pack.optic_prompt(optic))?;
-    let practices = read_pack_text(&pack.optic_practices(optic))?;
-    let evidence = read_pack_text(&pack.optic_evidence(optic))?;
-    let false_positives = read_pack_text(&pack.optic_false_positives(optic))?;
-    let integration = integration_context(pack)?;
-    let prompt = render_template(
-        &template,
-        &map_values([
-            ("base_reviewer_guidance", base_reviewer_guidance),
-            ("optic_prompt", &optic_prompt),
-            ("repository_context", repository_context),
-            ("domain_map", domain_map),
-            ("optic_id", optic.as_str()),
-            ("optic_practices", &practices),
-            ("optic_evidence", &evidence),
-            ("optic_false_positives", &false_positives),
-            ("integration_context", &integration),
-            ("output_paths", &output_paths),
-        ]),
-    );
-
-    let _ = runner.run(
-        optic.as_str(),
-        &format!("{} project optic review", optic.as_str()),
-        prompt,
-        report_path.clone(),
-        findings_path.clone(),
-    )?;
-    ensure_review_report(&report_path, &format!("{} Project Optic", optic.title()))?;
-    ensure_empty_findings(&findings_path)?;
-    Ok((report_path, findings_path))
-}
-
-fn run_cross_system_review(
-    runner: &mut StepRunner,
-    pack: &Pack,
-    base_reviewer_guidance: &str,
-    repository_context: &str,
-    domain_map: &str,
-) -> Result<PathBuf> {
-    let report_path = runner.run_dir.join("reports/cross-system.md");
-    let findings_path = runner.run_dir.join("findings/cross-system.yaml");
-    let output_paths = output_paths(&report_path, &findings_path, "reviewer notes in raw dir");
-    let template = read_pack_text(&pack.prompt("cross-system-review"))?;
-    let integration = integration_context(pack)?;
-    let cross_system_lenses = cross_system_lenses();
-    let prompt = render_template(
-        &template,
-        &map_values([
-            ("base_reviewer_guidance", base_reviewer_guidance),
-            ("repository_context", repository_context),
-            ("domain_map", domain_map),
-            ("integration_context", &integration),
-            ("cross_system_lenses", &cross_system_lenses),
-            ("output_paths", &output_paths),
-        ]),
-    );
-
-    let _ = runner.run(
-        "cross-system",
-        "cross-system review",
-        prompt,
-        report_path.clone(),
-        findings_path.clone(),
-    )?;
-    ensure_review_report(&report_path, "Cross-System Review")?;
-    ensure_empty_findings(&findings_path)?;
-    Ok(findings_path)
-}
-
-fn run_domain_synthesis(
-    runner: &mut StepRunner,
-    pack: &Pack,
-    base_reviewer_guidance: &str,
-    domain: &Domain,
-    review_reports: &[PathBuf],
-) -> Result<PathBuf> {
-    let report_path = runner
-        .run_dir
-        .join("reports/domains")
-        .join(format!("{}.md", domain.domain_id));
-    let findings_path = runner
-        .run_dir
-        .join("findings")
-        .join(format!("{}.synthesis.yaml", domain.domain_id));
-    let domain_findings = read_paths(review_reports, 40_000)?;
-    let domain_context = domain_markdown(domain);
-    let output_paths = output_paths(&report_path, &findings_path, "synthesis notes in raw dir");
-    let template = read_pack_text(&pack.prompt("domain-synthesis"))?;
-    let integration = integration_context(pack)?;
-    let prompt = render_template(
-        &template,
-        &map_values([
-            ("base_reviewer_guidance", base_reviewer_guidance),
-            ("domain_id", &domain.domain_id),
-            ("domain_name", &domain.name),
-            ("domain_context", &domain_context),
-            ("domain_findings", &domain_findings),
-            ("integration_context", &integration),
-            ("output_paths", &output_paths),
-        ]),
-    );
-
-    let _ = runner.run(
-        &format!("{}-synthesis", domain.domain_id),
-        "domain synthesis",
-        prompt,
-        report_path.clone(),
-        findings_path.clone(),
-    )?;
-    ensure_review_report(&report_path, &format!("{} Synthesis", domain.name))?;
-    ensure_empty_findings(&findings_path)?;
-    Ok(report_path)
-}
-
-fn run_system_synthesis(
-    runner: &mut StepRunner,
-    pack: &Pack,
-    base_reviewer_guidance: &str,
-    repository_context: &str,
-    domain_synthesis_reports: &[PathBuf],
-) -> Result<PathBuf> {
-    let report_path = runner.run_dir.join("reports/system-review.md");
-    let findings_path = runner.run_dir.join("findings/system.yaml");
-    let synthesis_inputs = read_paths(domain_synthesis_reports, 80_000)?;
-    let output_paths = output_paths(
-        &report_path,
-        &findings_path,
-        "system synthesis notes in raw dir",
-    );
-    let template = read_pack_text(&pack.prompt("system-synthesis"))?;
-    let integration = integration_context(pack)?;
-    let prompt = render_template(
-        &template,
-        &map_values([
-            ("base_reviewer_guidance", base_reviewer_guidance),
-            ("repository_context", repository_context),
-            ("synthesis_inputs", &synthesis_inputs),
-            ("integration_context", &integration),
-            ("output_paths", &output_paths),
-        ]),
-    );
-
-    let _ = runner.run(
-        "system-synthesis",
-        "system synthesis",
-        prompt,
-        report_path.clone(),
-        findings_path.clone(),
-    )?;
-    ensure_review_report(&report_path, "System Review")?;
-    ensure_empty_findings(&findings_path)?;
-    Ok(report_path)
-}
-
-fn run_previous_runs_comparison(
-    runner: &mut StepRunner,
-    pack: &Pack,
-    base_reviewer_guidance: &str,
-    current_findings: &[PathBuf],
-    previous_runs: &[PathBuf],
-) -> Result<PathBuf> {
-    let report_path = runner.run_dir.join("reports/previous-runs-comparison.md");
-    let findings_path = runner
-        .run_dir
-        .join("findings/previous-runs-comparison.yaml");
-    let current_findings = read_paths(current_findings, 80_000)?;
-    let previous_run_context = previous_run_context(previous_runs)?;
-    let output_paths = output_paths(&report_path, &findings_path, "comparison notes in raw dir");
-    let template = read_pack_text(&pack.prompt("previous-runs-comparison"))?;
-    let integration = integration_context(pack)?;
-    let prompt = render_template(
-        &template,
-        &map_values([
-            ("base_reviewer_guidance", base_reviewer_guidance),
-            ("current_findings", &current_findings),
-            ("previous_run_context", &previous_run_context),
-            ("integration_context", &integration),
-            ("output_paths", &output_paths),
-        ]),
-    );
-
-    let _ = runner.run(
-        "previous-runs-comparison",
-        "previous runs comparison",
-        prompt,
-        report_path.clone(),
-        findings_path.clone(),
-    )?;
-    ensure_review_report(&report_path, "Previous Runs Comparison")?;
-    ensure_empty_findings(&findings_path)?;
-    Ok(report_path)
-}
-
-fn run_final_editor(
-    runner: &mut StepRunner,
-    pack: &Pack,
-    base_reviewer_guidance: &str,
-    system_report: &Path,
-    domain_synthesis_reports: &[PathBuf],
-    previous_report: &Path,
-) -> Result<PathBuf> {
-    let report_path = runner.run_dir.join("reports/final-report.md");
-    let findings_path = runner.run_dir.join("findings/final.yaml");
-    let mut inputs = String::new();
-    inputs.push_str(&read_optional(system_report)?.unwrap_or_default());
-    inputs.push_str("\n\n");
-    inputs.push_str(&read_paths(domain_synthesis_reports, 100_000)?);
-    inputs.push_str("\n\n");
-    inputs.push_str(&read_optional(previous_report)?.unwrap_or_default());
-    let output_paths = output_paths(
-        &report_path,
-        &findings_path,
-        "final editor notes in raw dir",
-    );
-    let template = read_pack_text(&pack.prompt("final-editor"))?;
-    let integration = integration_context(pack)?;
-    let final_editor_checklist = read_pack_text(&pack.integration("final-editor-checklist"))?;
-    let prompt = render_template(
-        &template,
-        &map_values([
-            ("base_reviewer_guidance", base_reviewer_guidance),
-            ("final_editor_inputs", &truncate_chars(&inputs, 120_000)),
-            ("integration_context", &integration),
-            ("final_editor_checklist", &final_editor_checklist),
-            ("output_paths", &output_paths),
-        ]),
-    );
-
-    let _ = runner.run(
-        "final-editor",
-        "final editorial verification",
-        prompt,
-        report_path.clone(),
-        findings_path.clone(),
-    )?;
-    ensure_empty_findings(&findings_path)?;
-    Ok(report_path)
 }
 
 fn resolve_pack(plan: &AuditPlan, configured_source: Option<&Path>) -> Result<Pack> {
@@ -1028,6 +1473,20 @@ fn selected_previous_runs(args: &RunArgs, output_dir: &Path) -> Result<Vec<PathB
 
 fn total_step_count(domains: &[Domain], lenses: &[Lens], optics: &[Optic]) -> usize {
     1 + (domains.len() * lenses.len()) + optics.len() + 1 + domains.len() + 1 + 1 + 1
+}
+
+fn validate_unique_domain_ids(domains: &[Domain]) -> Result<()> {
+    let mut seen = BTreeMap::<&str, &str>::new();
+    for domain in domains {
+        if let Some(existing) = seen.insert(&domain.domain_id, &domain.name) {
+            bail!(
+                "domains `{existing}` and `{}` both resolve to id `{}`; choose distinct domain names",
+                domain.name,
+                domain.domain_id
+            );
+        }
+    }
+    Ok(())
 }
 
 fn lenses_from_ids(ids: &[String]) -> Vec<Lens> {

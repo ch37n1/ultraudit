@@ -140,6 +140,8 @@ fn print_audit_plan(plan: &AuditPlan, output: &OutputArgs) {
         output,
     );
     print_kv("agent", &plan.agent, output);
+    print_kv("jobs", plan.jobs, output);
+    print_kv("retries", plan.retries, output);
     print_kv("pack", &plan.pack, output);
     print_kv("pack name", &plan.pack_name, output);
     print_kv("pack version", &plan.pack_version, output);
@@ -184,6 +186,8 @@ fn print_run_summary(summary: &RunSummary, output: &OutputArgs) {
     print_kv("domains", display_list_or(&summary.domains, "none"), output);
     print_kv("lenses", display_list_or(&summary.lenses, "none"), output);
     print_kv("optics", display_list_or(&summary.optics, "none"), output);
+    print_kv("jobs", summary.jobs, output);
+    print_kv("retries", summary.retries, output);
     print_kv("agent steps", summary.steps.len(), output);
 }
 

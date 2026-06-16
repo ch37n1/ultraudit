@@ -60,7 +60,21 @@ fn plan_can_emit_json() {
     cmd.args(["--format", "json", "run", "--plan", "--pack", "production"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"pack\": \"production\""));
+        .stdout(predicate::str::contains("\"pack\": \"production\""))
+        .stdout(predicate::str::contains("\"jobs\": 4"))
+        .stdout(predicate::str::contains("\"retries\": 1"));
+}
+
+#[test]
+fn run_rejects_retry_counts_above_three() {
+    let mut cmd = Command::cargo_bin("uat").unwrap();
+
+    cmd.args(["run", "--plan", "--retries", "4"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "retry count must be between 0 and 3",
+        ));
 }
 
 #[test]
@@ -325,6 +339,46 @@ fn run_does_not_fail_on_mcp_transport_stderr_when_agent_succeeds() {
     let raw_stderr = fs::read_to_string(run_dir.join("raw/001-domain-discovery/stderr.log"))
         .expect("agent stderr should be logged");
     assert!(raw_stderr.contains("Auth(AuthorizationRequired)"));
+}
+
+#[test]
+fn run_retries_failed_agent_step_before_accepting_success() {
+    let workspace = temp_workspace("agent-retry");
+    let marker = workspace.join("retry-marker");
+    let command = format!(
+        "if [ ! -f {marker} ]; then touch {marker}; printf '%s\\n' 'transient failure' >&2; exit 2; fi; mkdir -p $(dirname {{{{ report_path_sh }}}}) $(dirname {{{{ findings_path_sh }}}}) $(dirname {{{{ notes_path_sh }}}}); printf '# Agent Step\\n\\nok\\n' > {{{{ report_path_sh }}}}; printf '[]\\n' > {{{{ findings_path_sh }}}}; printf 'notes\\n' > {{{{ notes_path_sh }}}}",
+        marker = shell_quote(&marker)
+    );
+    let setup = scripted_shell_agent_setup_in_workspace(workspace, "retrying", 30, &command);
+
+    let mut cmd = Command::cargo_bin("uat").unwrap();
+    cmd.arg("run")
+        .arg("--repo")
+        .arg(&setup.repo)
+        .arg("--config")
+        .arg(setup.project_config_dir.join("config.toml"))
+        .arg("--prompt-home")
+        .arg(&setup.prompt_home)
+        .arg("--output-dir")
+        .arg(&setup.output_dir)
+        .arg("--agent")
+        .arg("retrying")
+        .arg("--lens")
+        .arg("architecture")
+        .arg("--domain")
+        .arg("core")
+        .arg("--jobs")
+        .arg("1")
+        .arg("--retries")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("audit complete"));
+
+    let run_dir = newest_run_dir(&setup.output_dir);
+    let exit = read_exit_json(&run_dir);
+    assert_eq!(exit["success"], true);
+    assert!(marker.exists());
 }
 
 #[test]
@@ -737,6 +791,15 @@ fn scripted_shell_agent_setup(
     command: &str,
 ) -> ShellAgentSetup {
     let workspace = temp_workspace(name);
+    scripted_shell_agent_setup_in_workspace(workspace, agent_name, timeout_seconds, command)
+}
+
+fn scripted_shell_agent_setup_in_workspace(
+    workspace: PathBuf,
+    agent_name: &str,
+    timeout_seconds: u64,
+    command: &str,
+) -> ShellAgentSetup {
     let repo = workspace.join("repo");
     let project_config_dir = repo.join(".audit");
     let prompt_home = workspace.join("home");
@@ -791,6 +854,10 @@ fn toml_string(value: &str) -> String {
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")
+}
+
+fn shell_quote(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
 }
 
 fn read_exit_json(run_dir: &Path) -> serde_json::Value {
@@ -855,13 +922,13 @@ fn is_datetime_run_dir_name(name: &str) -> bool {
         && bytes[35..].iter().all(u8::is_ascii_digit)
 }
 
-fn install_test_pack(prompt_home: &PathBuf) {
+fn install_test_pack(prompt_home: &Path) {
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("packs/0.2.0");
     let target = prompt_home.join("packs/0.2.0");
     copy_dir_recursive(&source, &target);
 }
 
-fn copy_dir_recursive(source: &PathBuf, target: &PathBuf) {
+fn copy_dir_recursive(source: &Path, target: &Path) {
     fs::create_dir_all(target).unwrap();
     for entry in fs::read_dir(source).unwrap() {
         let entry = entry.unwrap();

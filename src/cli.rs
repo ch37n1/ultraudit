@@ -12,6 +12,7 @@ EXAMPLES:
     uat run --lens security --lens correctness
     uat run --optic documentation-knowledge
     uat run --agent codex --prompt-home ~/.ultraudit
+    uat run --jobs 4 --retries 1
     ULTRAUDIT_PATH=./for-test uat run --dry-run
     uat run --plan --pack default
 
@@ -131,6 +132,14 @@ pub struct RunArgs {
     /// Continue the flow and preserve artifacts when an agent command fails.
     #[arg(long)]
     pub allow_agent_failures: bool,
+
+    /// Maximum number of agent steps to run at once.
+    #[arg(long, value_name = "N", default_value_t = 4, value_parser = parse_jobs)]
+    pub jobs: usize,
+
+    /// Retry a failed agent step before accepting failure.
+    #[arg(long, value_name = "N", default_value_t = 1, value_parser = parse_retries)]
+    pub retries: u8,
 
     /// Run the full audit flow with fake agent calls.
     #[arg(long)]
@@ -376,4 +385,24 @@ fn value_name<T: ValueEnum>(value: &T) -> String {
         .expect("value enum variants must have names")
         .get_name()
         .to_owned()
+}
+
+fn parse_jobs(value: &str) -> Result<usize, String> {
+    let jobs = value
+        .parse::<usize>()
+        .map_err(|_| format!("`{value}` is not a valid job count"))?;
+    if jobs == 0 {
+        return Err("job count must be at least 1".to_owned());
+    }
+    Ok(jobs)
+}
+
+fn parse_retries(value: &str) -> Result<u8, String> {
+    let retries = value
+        .parse::<u8>()
+        .map_err(|_| format!("`{value}` is not a valid retry count"))?;
+    if retries > 3 {
+        return Err("retry count must be between 0 and 3".to_owned());
+    }
+    Ok(retries)
 }
