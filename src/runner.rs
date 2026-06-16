@@ -346,6 +346,10 @@ fn build_codex_invocation(config: &AgentConfig) -> (PathBuf, Vec<String>) {
         args.push("--sandbox".to_owned());
         args.push(config.sandbox.clone());
     }
+    if let Some(model) = &config.model {
+        args.push("--model".to_owned());
+        args.push(model.clone());
+    }
     if !config.mode.is_empty() {
         args.push(config.mode.clone());
     }

@@ -256,13 +256,7 @@ impl LensPack {
 
     pub fn lenses(self) -> &'static [Lens] {
         match self {
-            LensPack::Default => &[
-                Lens::Architecture,
-                Lens::CodeQuality,
-                Lens::Security,
-                Lens::Correctness,
-                Lens::Testing,
-            ],
+            LensPack::Default => Lens::all(),
             LensPack::Production => &[
                 Lens::Reliability,
                 Lens::Performance,

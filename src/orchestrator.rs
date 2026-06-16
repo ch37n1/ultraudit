@@ -182,11 +182,11 @@ pub fn execute_audit(args: &RunArgs, options: AuditExecutionOptions) -> Result<R
             agent_name: plan.agent.clone(),
         }
     } else {
-        RunnerMode::Real(load_agent_config(
+        RunnerMode::Real(Box::new(load_agent_config(
             &plan.agent,
             plan.config.as_deref(),
             &plan.repository,
-        )?)
+        )?))
     };
     let mut runner = StepRunner {
         mode,
@@ -339,7 +339,7 @@ struct StepRunner {
 }
 
 enum RunnerMode {
-    Real(AgentConfig),
+    Real(Box<AgentConfig>),
     DryRun { agent_name: String },
 }
 
@@ -1203,6 +1203,7 @@ fn codex_agent_template() -> &'static str {
     r#"kind = "codex-cli"
 binary = "codex"
 mode = "exec"
+# model = "gpt-5"
 prompt_transport = "stdin"
 approval_policy = "never"
 sandbox = "workspace-write"

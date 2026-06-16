@@ -24,6 +24,7 @@ pub struct AgentConfig {
     pub kind: AgentKind,
     pub binary: PathBuf,
     pub mode: String,
+    pub model: Option<String>,
     pub prompt_transport: PromptTransport,
     pub approval_policy: String,
     pub sandbox: String,
@@ -52,6 +53,7 @@ impl AgentConfig {
             kind: AgentKind::CodexCli,
             binary: PathBuf::from("codex"),
             mode: "exec".to_owned(),
+            model: None,
             prompt_transport: PromptTransport::Stdin,
             approval_policy: "never".to_owned(),
             sandbox: "workspace-write".to_owned(),
@@ -182,6 +184,7 @@ fn agent_from_toml(
             kind: AgentKind::ShellTemplate,
             binary: PathBuf::from("sh"),
             mode: String::new(),
+            model: None,
             prompt_transport: PromptTransport::Stdin,
             approval_policy: "never".to_owned(),
             sandbox: "workspace-write".to_owned(),
@@ -202,6 +205,12 @@ fn agent_from_toml(
     }
     if let Some(mode) = parsed.value(section, "mode") {
         config.mode = mode.to_owned();
+    }
+    if let Some(model) = parsed
+        .value(section, "model")
+        .filter(|model| !model.is_empty())
+    {
+        config.model = Some(model.to_owned());
     }
     if let Some(prompt_transport) = parsed.value(section, "prompt_transport") {
         config.prompt_transport = parse_prompt_transport(prompt_transport)?;

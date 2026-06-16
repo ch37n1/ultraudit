@@ -64,6 +64,20 @@ fn plan_can_emit_json() {
 }
 
 #[test]
+fn default_plan_includes_all_lenses() {
+    let mut cmd = Command::cargo_bin("uat").unwrap();
+
+    cmd.args(["run", "--plan"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("architecture"))
+        .stdout(predicate::str::contains("reliability"))
+        .stdout(predicate::str::contains("dependency-supply-chain"))
+        .stdout(predicate::str::contains("ux-product"))
+        .stdout(predicate::str::contains("ml-ai"));
+}
+
+#[test]
 fn plan_uses_ultraudit_path_for_prompt_home() {
     let workspace = temp_workspace("env");
     let prompt_home = workspace.join("for-test");
@@ -118,6 +132,9 @@ fn init_writes_project_config_without_seeding_pack() {
     assert!(config.contains("version = \"0.2.0\""));
     assert!(config.contains("packs/0.2.0"));
     assert!(!config.contains("name = \"ultraudit-default\""));
+
+    let codex_config = fs::read_to_string(project_config_dir.join("agents/codex.toml")).unwrap();
+    assert!(codex_config.contains("# model = \"gpt-5\""));
 }
 
 #[test]
@@ -358,6 +375,7 @@ fn codex_cli_agent_uses_current_codex_exec_flags() {
             r#"kind = "codex-cli"
 binary = "{}"
 mode = "exec"
+model = "gpt-5-codex"
 prompt_transport = "stdin"
 approval_policy = "never"
 sandbox = "workspace-write"
@@ -390,7 +408,7 @@ timeout_seconds = 30
     let args = fs::read_to_string(recorded_args).unwrap();
     assert_eq!(
         args,
-        "--ask-for-approval\nnever\n--sandbox\nworkspace-write\nexec\n"
+        "--ask-for-approval\nnever\n--sandbox\nworkspace-write\n--model\ngpt-5-codex\nexec\n"
     );
 }
 
@@ -543,6 +561,7 @@ fn default_flow_runs_project_optics_once_and_excludes_code_quality_from_cross_sy
     assert!(run_dir
         .join("reports/optics/documentation-knowledge.md")
         .exists());
+    assert!(run_dir.join("reports/lenses/core.ml-ai.md").exists());
     assert!(!run_dir
         .join("reports/optics/core.documentation-knowledge.md")
         .exists());
@@ -559,7 +578,7 @@ fn default_flow_runs_project_optics_once_and_excludes_code_quality_from_cross_sy
         1
     );
 
-    let cross_system = fs::read_to_string(run_dir.join("raw/009-cross-system/prompt.md")).unwrap();
+    let cross_system = fs::read_to_string(run_dir.join("raw/019-cross-system/prompt.md")).unwrap();
     assert!(cross_system.contains("architecture"));
     assert!(cross_system.contains("ml-ai"));
     assert!(!cross_system.contains("# Code Quality Practices"));
