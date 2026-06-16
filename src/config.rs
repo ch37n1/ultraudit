@@ -1,12 +1,16 @@
 use std::{
     collections::BTreeMap,
-    fs,
     path::{Path, PathBuf},
 };
 
 use anyhow::{bail, Context, Result};
 
-use crate::util::{expand_tilde_path, resolve_path};
+use crate::{
+    toml::SimpleToml,
+    util::{expand_tilde_path, resolve_path},
+};
+
+const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
 
 #[derive(Debug, Clone, Default)]
 pub struct ProjectConfig {
@@ -16,6 +20,14 @@ pub struct ProjectConfig {
     pub output_dir: Option<PathBuf>,
     pub default_agent: Option<String>,
     pub disabled_optics: Vec<String>,
+    pub artifact_retention_days: Option<u64>,
+    pub prompt_max_chars: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelConfig {
+    pub default_model: Option<String>,
+    pub agent_models: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -115,7 +127,44 @@ pub fn load_project_config(path: Option<&Path>) -> Result<ProjectConfig> {
             .map(|path| expand_tilde_path(&path)),
         default_agent: parsed.value("run", "agent").map(ToOwned::to_owned),
         disabled_optics: parsed.array("run", "disabled_optics"),
+        artifact_retention_days: parsed
+            .value("artifacts", "retention_days")
+            .filter(|value| !value.is_empty())
+            .map(str::parse)
+            .transpose()
+            .context("parse artifacts.retention_days")?,
+        prompt_max_chars: parsed
+            .value("prompt", "max_chars")
+            .filter(|value| !value.is_empty())
+            .map(str::parse)
+            .transpose()
+            .context("parse prompt.max_chars")?,
     })
+}
+
+pub fn load_model_config(path: Option<&Path>) -> Result<ModelConfig> {
+    let Some(path) = path else {
+        return Ok(ModelConfig::default());
+    };
+
+    if !path.exists() {
+        return Ok(ModelConfig::default());
+    }
+
+    let parsed = SimpleToml::read(path)?;
+    let mut config = ModelConfig::default();
+    let parsed_agent_models = parse_agent_models(&parsed);
+    if let Some(default_model) = parsed
+        .value("models", "default")
+        .filter(|model| !model.is_empty())
+    {
+        config.default_model = Some(default_model.to_owned());
+        if !parsed_agent_models.contains_key("codex") {
+            config.agent_models.remove("codex");
+        }
+    }
+    config.agent_models.extend(parsed_agent_models);
+    Ok(config)
 }
 
 pub fn load_agent_config(
@@ -160,6 +209,117 @@ pub fn load_agent_config(
     } else {
         bail!("agent `{name}` is not configured in .audit/agents/{name}.toml")
     }
+}
+
+pub fn load_effective_agent_config(
+    name: &str,
+    project_config: Option<&Path>,
+    repository: &Path,
+) -> Result<AgentConfig> {
+    let mut config = load_agent_config(name, project_config, repository)?;
+    apply_model_config(&mut config, project_config, repository)?;
+    Ok(config)
+}
+
+pub fn resolve_agent_model(
+    name: &str,
+    project_config: Option<&Path>,
+    repository: &Path,
+    allow_missing_agent: bool,
+) -> Result<Option<String>> {
+    let model_config = load_model_config(project_config)?;
+    let model = model_config.model_for_agent(name).map(ToOwned::to_owned);
+
+    match load_agent_config(name, project_config, repository) {
+        Ok(agent) => Ok(agent.model.or(model)),
+        Err(error)
+            if allow_missing_agent
+                && agent_config_is_missing(name, project_config, repository)? =>
+        {
+            Ok(model)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+impl ModelConfig {
+    fn model_for_agent(&self, name: &str) -> Option<&str> {
+        self.agent_models
+            .get(name)
+            .map(String::as_str)
+            .or(self.default_model.as_deref())
+    }
+}
+
+impl Default for ModelConfig {
+    fn default() -> Self {
+        Self {
+            default_model: None,
+            agent_models: BTreeMap::from([("codex".to_owned(), DEFAULT_CODEX_MODEL.to_owned())]),
+        }
+    }
+}
+
+fn apply_model_config(
+    config: &mut AgentConfig,
+    project_config: Option<&Path>,
+    _repository: &Path,
+) -> Result<()> {
+    if config.model.is_some() {
+        return Ok(());
+    }
+
+    let model_config = load_model_config(project_config)?;
+    if let Some(model) = model_config.model_for_agent(&config.name) {
+        config.model = Some(model.to_owned());
+    }
+    Ok(())
+}
+
+fn parse_agent_models(parsed: &SimpleToml) -> BTreeMap<String, String> {
+    let mut models = BTreeMap::new();
+
+    if let Some(values) = parsed.sections.get("models") {
+        for (key, value) in values {
+            if key != "default" && !value.is_empty() {
+                models.insert(key.clone(), value.clone());
+            }
+        }
+    }
+
+    for (section, values) in &parsed.sections {
+        let Some(agent) = section.strip_prefix("agents.") else {
+            continue;
+        };
+        if let Some(model) = values.get("model").filter(|model| !model.is_empty()) {
+            models.insert(agent.to_owned(), model.clone());
+        }
+    }
+
+    models
+}
+
+fn agent_config_is_missing(
+    name: &str,
+    project_config: Option<&Path>,
+    repository: &Path,
+) -> Result<bool> {
+    if name == "codex" {
+        return Ok(false);
+    }
+
+    if agent_config_file(name, project_config, repository).exists() {
+        return Ok(false);
+    }
+
+    if let Some(path) = project_config.filter(|path| path.exists()) {
+        let parsed = SimpleToml::read(path)?;
+        if parsed.has_section(&format!("agents.{name}")) {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
 }
 
 fn agent_from_file(name: &str, path: &Path) -> Result<AgentConfig> {
@@ -247,6 +407,17 @@ fn agent_from_toml(
     Ok(config)
 }
 
+fn agent_config_file(name: &str, project_config: Option<&Path>, repository: &Path) -> PathBuf {
+    project_config
+        .and_then(Path::parent)
+        .map(|dir| dir.join("agents").join(format!("{name}.toml")))
+        .unwrap_or_else(|| {
+            repository
+                .join(".audit/agents")
+                .join(format!("{name}.toml"))
+        })
+}
+
 fn command_or_path(value: &str, base: &Path) -> PathBuf {
     let path = PathBuf::from(value);
     if path.is_absolute() || value.contains('/') {
@@ -277,114 +448,5 @@ fn parse_bool(value: &str) -> Result<bool> {
         "true" => Ok(true),
         "false" => Ok(false),
         other => bail!("expected `true` or `false`, got `{other}`"),
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-struct SimpleToml {
-    sections: BTreeMap<String, BTreeMap<String, String>>,
-}
-
-impl SimpleToml {
-    fn read(path: &Path) -> Result<Self> {
-        let contents =
-            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        Ok(Self::parse(&contents))
-    }
-
-    fn parse(contents: &str) -> Self {
-        let mut parsed = Self::default();
-        let mut section = String::new();
-
-        for line in contents.lines() {
-            let stripped = strip_comment(line);
-            let line = stripped.trim();
-            if line.is_empty() {
-                continue;
-            }
-
-            if let Some(raw_section) = line
-                .strip_prefix('[')
-                .and_then(|value| value.strip_suffix(']'))
-            {
-                section = raw_section.trim().to_owned();
-                parsed.sections.entry(section.clone()).or_default();
-                continue;
-            }
-
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-
-            parsed
-                .sections
-                .entry(section.clone())
-                .or_default()
-                .insert(key.trim().to_owned(), parse_value(value.trim()));
-        }
-
-        parsed
-    }
-
-    fn has_section(&self, section: &str) -> bool {
-        self.sections.contains_key(section)
-    }
-
-    fn value(&self, section: &str, key: &str) -> Option<&str> {
-        self.sections
-            .get(section)
-            .and_then(|values| values.get(key))
-            .map(String::as_str)
-    }
-
-    fn array(&self, section: &str, key: &str) -> Vec<String> {
-        let Some(value) = self.value(section, key) else {
-            return Vec::new();
-        };
-
-        let Some(inner) = value
-            .strip_prefix('[')
-            .and_then(|value| value.strip_suffix(']'))
-        else {
-            return Vec::new();
-        };
-
-        inner
-            .split(',')
-            .map(str::trim)
-            .filter(|item| !item.is_empty())
-            .map(parse_value)
-            .collect()
-    }
-}
-
-fn strip_comment(line: &str) -> String {
-    let mut in_quote = false;
-    let mut previous = '\0';
-
-    for (index, ch) in line.char_indices() {
-        if ch == '"' && previous != '\\' {
-            in_quote = !in_quote;
-        }
-
-        if ch == '#' && !in_quote {
-            return line[..index].to_owned();
-        }
-
-        previous = ch;
-    }
-
-    line.to_owned()
-}
-
-fn parse_value(value: &str) -> String {
-    let value = value.trim();
-    if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
-        value[1..value.len() - 1]
-            .replace("\\\"", "\"")
-            .replace("\\n", "\n")
-            .replace("\\\\", "\\")
-    } else {
-        value.to_owned()
     }
 }

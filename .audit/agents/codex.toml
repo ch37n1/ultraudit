@@ -1,6 +1,8 @@
 kind = "codex-cli"
 binary = "codex"
 mode = "exec"
+# Agent-local `model = "..."` overrides `.audit/config.toml` [models].
+ignore_user_config = true
 prompt_transport = "stdin"
 approval_policy = "never"
 sandbox = "workspace-write"

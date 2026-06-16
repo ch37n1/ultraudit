@@ -3,14 +3,17 @@ use std::{
     fs::File,
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Context, Result};
 use wait_timeout::ChildExt;
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use crate::{
     config::{AgentConfig, AgentKind, PromptTransport},
@@ -66,6 +69,7 @@ pub fn run_agent(
 
     let mut command = Command::new(&built.program);
     command.args(&built.args).current_dir(&built.cwd);
+    configure_process_group(&mut command);
 
     let output_files = if options.live_output {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -155,8 +159,7 @@ pub fn run_agent(
             (!status.success()).then(|| format!("agent exited with status {status}")),
         )
     } else {
-        let _ = child.kill();
-        let _ = child.wait();
+        terminate_child_process(&mut child);
         (
             true,
             None,
@@ -194,6 +197,37 @@ pub fn run_agent(
             request.raw_dir.display()
         ))
     }
+}
+
+#[cfg(unix)]
+fn configure_process_group(command: &mut Command) {
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_process_group(_command: &mut Command) {}
+
+fn terminate_child_process(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let process_group = format!("-{}", child.id());
+        let _ = Command::new("kill")
+            .args(["-TERM", &process_group])
+            .status();
+        thread::sleep(Duration::from_millis(100));
+        if matches!(child.try_wait(), Ok(None)) {
+            let _ = Command::new("kill")
+                .args(["-KILL", &process_group])
+                .status();
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+
+    let _ = child.wait();
 }
 
 fn spawn_output_tee<R>(

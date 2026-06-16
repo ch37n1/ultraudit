@@ -18,6 +18,10 @@ Build the system-level review from domain synthesis reports and cross-system fin
 
 {{ synthesis_inputs }}
 
+## Cross-System Inputs
+
+{{ cross_system_inputs }}
+
 ## Output Paths
 
 ```text

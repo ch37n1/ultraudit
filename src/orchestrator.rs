@@ -3,6 +3,7 @@ use std::{
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         mpsc::{self, RecvTimeoutError, Sender},
         Arc,
@@ -16,7 +17,10 @@ use terminal_size::{terminal_size, Width};
 
 use crate::{
     cli::{Lens, Optic, RunArgs},
-    config::{find_project_config, load_agent_config, load_project_config, AgentConfig},
+    config::{
+        find_project_config, load_effective_agent_config, load_project_config, resolve_agent_model,
+        AgentConfig,
+    },
     intake::{
         collect_repository_context, domain_map_markdown, domain_markdown, infer_domains,
         repository_markdown, write_repository_artifacts,
@@ -25,7 +29,10 @@ use crate::{
         AgentStepRecord, AuditPlan, Domain, DomainMap, InitPlan, PromptPackManifest, RunManifest,
         RunSummary,
     },
-    pack::{legacy_pack_root, pack_root, read_pack_text, render_template, snapshot_pack, Pack},
+    pack::{
+        legacy_pack_root, load_optional_pack_policy, pack_root, read_pack_policy, read_pack_text,
+        render_template, snapshot_pack, validate_pack_files, Pack, PackPolicy,
+    },
     runner::{run_agent, run_agent_dry_run, AgentRunOptions, AgentRunRequest},
     util::{
         copy_dir_recursive, now_run_id, read_optional, resolve_path, sanitize_id, truncate_chars,
@@ -46,6 +53,8 @@ pub enum ProgressDisplay {
     Spinner,
 }
 
+const DEFAULT_PROMPT_MAX_CHARS: usize = 180_000;
+
 pub fn build_audit_plan(args: &RunArgs) -> Result<AuditPlan> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let repository = resolve_path(&args.repository, &cwd);
@@ -59,9 +68,18 @@ pub fn build_audit_plan(args: &RunArgs) -> Result<AuditPlan> {
         .prompt_pack_source
         .clone()
         .unwrap_or_else(|| pack_root(&prompt_home, &pack_name, &pack_version));
-    let lenses = selected_lenses(args);
-    let optics = selected_optics(args, &project_config.disabled_optics);
+    let pack_policy = load_optional_pack_policy(&pack_source)?.unwrap_or_else(PackPolicy::builtin);
+    let lenses = selected_lenses(args, &pack_policy);
+    let optics = selected_optics(args, &project_config.disabled_optics, &pack_policy);
     let previous_runs = selected_previous_runs(args, &output_dir)?;
+
+    let agent = selected_agent(args, &project_config.default_agent);
+    let model = resolve_agent_model(
+        &agent,
+        config.as_deref(),
+        &repository,
+        args.dry_run || args.plan,
+    )?;
 
     Ok(AuditPlan {
         repository,
@@ -72,7 +90,8 @@ pub fn build_audit_plan(args: &RunArgs) -> Result<AuditPlan> {
         pack_version,
         pack_source,
         pack: args.pack.as_str().to_owned(),
-        agent: selected_agent(args, &project_config.default_agent),
+        agent,
+        model,
         lenses: lenses.iter().map(|lens| lens.as_str().to_owned()).collect(),
         optics: optics
             .iter()
@@ -142,10 +161,15 @@ pub fn execute_audit(args: &RunArgs, options: AuditExecutionOptions) -> Result<R
     }
 
     let project_config = load_project_config(plan.config.as_deref())?;
-    let pack = resolve_pack(&plan, project_config.prompt_pack_source.as_deref())?;
+    let resolved_pack = resolve_pack(&plan, project_config.prompt_pack_source.as_deref())?;
+    let pack = resolved_pack.pack;
+    let pack_policy = resolved_pack.policy;
 
     fs::create_dir_all(&plan.output_dir)
         .with_context(|| format!("create {}", plan.output_dir.display()))?;
+    if let Some(retention_days) = project_config.artifact_retention_days {
+        prune_old_runs(&plan.output_dir, retention_days)?;
+    }
     let run_id = now_run_id();
     let run_dir = plan.output_dir.join(&run_id);
     fs::create_dir_all(&run_dir).with_context(|| format!("create {}", run_dir.display()))?;
@@ -155,7 +179,10 @@ pub fn execute_audit(args: &RunArgs, options: AuditExecutionOptions) -> Result<R
         name: pack.name.clone(),
         version: pack.version.clone(),
         source: pack.root.clone(),
-        snapshot,
+        snapshot: snapshot.path,
+        content_fingerprint: snapshot.content_fingerprint,
+        file_count: snapshot.file_count,
+        byte_count: snapshot.byte_count,
     };
     let manifest = RunManifest {
         run_id: run_id.clone(),
@@ -165,6 +192,7 @@ pub fn execute_audit(args: &RunArgs, options: AuditExecutionOptions) -> Result<R
         config: plan.config.clone(),
         prompt_pack: pack_manifest,
         agent: plan.agent.clone(),
+        model: plan.model.clone(),
         selected_pack: plan.pack.clone(),
         selected_lenses: plan.lenses.clone(),
         selected_optics: plan.optics.clone(),
@@ -191,7 +219,7 @@ pub fn execute_audit(args: &RunArgs, options: AuditExecutionOptions) -> Result<R
             agent_name: plan.agent.clone(),
         }
     } else {
-        RunnerMode::Real(Arc::new(load_agent_config(
+        RunnerMode::Real(Arc::new(load_effective_agent_config(
             &plan.agent,
             plan.config.as_deref(),
             &plan.repository,
@@ -214,6 +242,9 @@ pub fn execute_audit(args: &RunArgs, options: AuditExecutionOptions) -> Result<R
         },
         verbose_agent_output: options.verbose_agent_output,
         retries: plan.retries,
+        prompt_max_chars: project_config
+            .prompt_max_chars
+            .unwrap_or(DEFAULT_PROMPT_MAX_CHARS),
         counter: 0,
         steps: Vec::new(),
     };
@@ -234,6 +265,7 @@ pub fn execute_audit(args: &RunArgs, options: AuditExecutionOptions) -> Result<R
         repository_context: repository_context.clone(),
         domain_map_context: domain_map_context.clone(),
         previous_runs: plan.previous_runs.clone(),
+        pack_policy: pack_policy.clone(),
     });
     let planned_jobs = plan_audit_jobs(&mut runner, &domains, &selected_lenses, &selected_optics)?;
     let final_report = planned_jobs.final_report.clone();
@@ -266,6 +298,7 @@ pub fn execute_audit(args: &RunArgs, options: AuditExecutionOptions) -> Result<R
             .collect(),
         lenses: plan.lenses,
         optics: plan.optics,
+        model: plan.model,
         dry_run: plan.dry_run,
         jobs: plan.jobs,
         retries: plan.retries,
@@ -284,6 +317,7 @@ struct StepRunner {
     progress: RunProgress,
     verbose_agent_output: bool,
     retries: u8,
+    prompt_max_chars: usize,
     counter: usize,
     steps: Vec<AgentStepRecord>,
 }
@@ -352,6 +386,7 @@ impl StepRunner {
             progress: self.progress,
             verbose_agent_output: self.verbose_agent_output,
             retries: self.retries,
+            prompt_max_chars: self.prompt_max_chars,
         }
     }
 }
@@ -375,10 +410,12 @@ struct StepExecutor {
     progress: RunProgress,
     verbose_agent_output: bool,
     retries: u8,
+    prompt_max_chars: usize,
 }
 
 impl StepExecutor {
     fn run_prompt(&self, planned: &PlannedStep, prompt: String) -> Result<AgentStepRecord> {
+        let prompt = limit_prompt_chars(&prompt, self.prompt_max_chars);
         let request = AgentRunRequest {
             step_id: planned.step_id.clone(),
             role: planned.role.clone(),
@@ -395,9 +432,21 @@ impl StepExecutor {
             .step_started(planned.ordinal, &request.step_id, &planned.role);
         let attempts = usize::from(self.retries) + 1;
         let mut last_error = None;
+        let artifact_root = run_artifact_root(&planned.raw_dir);
 
         for attempt in 1..=attempts {
-            match self.run_attempt(&request) {
+            cleanup_stale_step_outputs(&request)?;
+            let repository_before =
+                repository_status_snapshot(&self.repository, artifact_root.as_deref())?;
+            let attempt_result = self.run_attempt(&request);
+            ensure_repository_unchanged(
+                &self.repository,
+                artifact_root.as_deref(),
+                repository_before.as_deref(),
+                &request.step_id,
+            )?;
+
+            match attempt_result {
                 Ok(record) if record.exit.success || attempt == attempts => {
                     let output_result = ensure_step_outputs(&record);
                     activity.finish(record.exit.success && output_result.is_ok());
@@ -456,9 +505,12 @@ enum StepJobKind {
     DomainSynthesis {
         domain: Domain,
         review_reports: Vec<PathBuf>,
+        review_findings: Vec<PathBuf>,
     },
     SystemSynthesis {
         domain_synthesis_reports: Vec<PathBuf>,
+        cross_system_report: PathBuf,
+        cross_system_findings: PathBuf,
     },
     PreviousRunsComparison {
         current_findings: Vec<PathBuf>,
@@ -466,6 +518,8 @@ enum StepJobKind {
     FinalEditor {
         system_report: PathBuf,
         domain_synthesis_reports: Vec<PathBuf>,
+        cross_system_report: PathBuf,
+        cross_system_findings: PathBuf,
         previous_report: PathBuf,
     },
 }
@@ -477,6 +531,7 @@ struct AuditJobContext {
     repository_context: String,
     domain_map_context: String,
     previous_runs: Vec<PathBuf>,
+    pack_policy: PackPolicy,
 }
 
 struct PlannedAuditJobs {
@@ -637,7 +692,7 @@ fn execute_step_job(
                 &job.planned.report_path,
                 &format!("{} / {}", domain.name, lens.title()),
             )?;
-            ensure_empty_findings(&job.planned.findings_path)?;
+            ensure_valid_findings(&job.planned.findings_path)?;
             Ok(record)
         }
         StepJobKind::ProjectOpticReview { optic } => {
@@ -647,38 +702,51 @@ fn execute_step_job(
                 &job.planned.report_path,
                 &format!("{} Project Optic", optic.title()),
             )?;
-            ensure_empty_findings(&job.planned.findings_path)?;
+            ensure_valid_findings(&job.planned.findings_path)?;
             Ok(record)
         }
         StepJobKind::CrossSystemReview => {
             let prompt = build_cross_system_review_prompt(context, &job.planned)?;
             let record = executor.run_prompt(&job.planned, prompt)?;
             ensure_review_report(&job.planned.report_path, "Cross-System Review")?;
-            ensure_empty_findings(&job.planned.findings_path)?;
+            ensure_valid_findings(&job.planned.findings_path)?;
             Ok(record)
         }
         StepJobKind::DomainSynthesis {
             domain,
             review_reports,
+            review_findings,
         } => {
-            let prompt =
-                build_domain_synthesis_prompt(context, &job.planned, domain, review_reports)?;
+            let prompt = build_domain_synthesis_prompt(
+                context,
+                &job.planned,
+                domain,
+                review_reports,
+                review_findings,
+            )?;
             let record = executor.run_prompt(&job.planned, prompt)?;
             ensure_review_report(
                 &job.planned.report_path,
                 &format!("{} Synthesis", domain.name),
             )?;
-            ensure_empty_findings(&job.planned.findings_path)?;
+            ensure_valid_findings(&job.planned.findings_path)?;
             Ok(record)
         }
         StepJobKind::SystemSynthesis {
             domain_synthesis_reports,
+            cross_system_report,
+            cross_system_findings,
         } => {
-            let prompt =
-                build_system_synthesis_prompt(context, &job.planned, domain_synthesis_reports)?;
+            let prompt = build_system_synthesis_prompt(
+                context,
+                &job.planned,
+                domain_synthesis_reports,
+                cross_system_report,
+                cross_system_findings,
+            )?;
             let record = executor.run_prompt(&job.planned, prompt)?;
             ensure_review_report(&job.planned.report_path, "System Review")?;
-            ensure_empty_findings(&job.planned.findings_path)?;
+            ensure_valid_findings(&job.planned.findings_path)?;
             Ok(record)
         }
         StepJobKind::PreviousRunsComparison { current_findings } => {
@@ -686,12 +754,14 @@ fn execute_step_job(
                 build_previous_runs_comparison_prompt(context, &job.planned, current_findings)?;
             let record = executor.run_prompt(&job.planned, prompt)?;
             ensure_review_report(&job.planned.report_path, "Previous Runs Comparison")?;
-            ensure_empty_findings(&job.planned.findings_path)?;
+            ensure_valid_findings(&job.planned.findings_path)?;
             Ok(record)
         }
         StepJobKind::FinalEditor {
             system_report,
             domain_synthesis_reports,
+            cross_system_report,
+            cross_system_findings,
             previous_report,
         } => {
             let prompt = build_final_editor_prompt(
@@ -699,10 +769,12 @@ fn execute_step_job(
                 &job.planned,
                 system_report,
                 domain_synthesis_reports,
+                cross_system_report,
+                cross_system_findings,
                 previous_report,
             )?;
             let record = executor.run_prompt(&job.planned, prompt)?;
-            ensure_empty_findings(&job.planned.findings_path)?;
+            ensure_valid_findings(&job.planned.findings_path)?;
             Ok(record)
         }
     }
@@ -922,6 +994,7 @@ fn plan_audit_jobs(
 ) -> Result<PlannedAuditJobs> {
     let mut jobs = Vec::new();
     let mut domain_review_reports = BTreeMap::<String, Vec<PathBuf>>::new();
+    let mut domain_review_findings = BTreeMap::<String, Vec<PathBuf>>::new();
     let mut domain_review_job_ids = BTreeMap::<String, Vec<usize>>::new();
     let mut review_job_ids = Vec::new();
     let mut all_findings = Vec::new();
@@ -958,6 +1031,10 @@ fn plan_audit_jobs(
                 .entry(domain.domain_id.clone())
                 .or_default()
                 .push(report_path);
+            domain_review_findings
+                .entry(domain.domain_id.clone())
+                .or_default()
+                .push(findings_path.clone());
             domain_review_job_ids
                 .entry(domain.domain_id.clone())
                 .or_default()
@@ -1002,13 +1079,13 @@ fn plan_audit_jobs(
         planned: runner.plan_step(
             "cross-system",
             "cross-system review",
-            cross_system_report,
+            cross_system_report.clone(),
             cross_system_findings.clone(),
         ),
         kind: StepJobKind::CrossSystemReview,
     });
     review_job_ids.push(cross_system_job_id);
-    all_findings.push(cross_system_findings);
+    all_findings.push(cross_system_findings.clone());
 
     let mut domain_synthesis_reports = Vec::new();
     let mut domain_synthesis_job_ids = Vec::new();
@@ -1029,6 +1106,10 @@ fn plan_audit_jobs(
             .get(&domain.domain_id)
             .cloned()
             .unwrap_or_default();
+        let review_findings = domain_review_findings
+            .get(&domain.domain_id)
+            .cloned()
+            .unwrap_or_default();
         let planned = runner.plan_step(
             &format!("{}-synthesis", domain.domain_id),
             "domain synthesis",
@@ -1043,6 +1124,7 @@ fn plan_audit_jobs(
             kind: StepJobKind::DomainSynthesis {
                 domain: domain.clone(),
                 review_reports,
+                review_findings,
             },
         });
         domain_synthesis_reports.push(report_path);
@@ -1065,6 +1147,8 @@ fn plan_audit_jobs(
         ),
         kind: StepJobKind::SystemSynthesis {
             domain_synthesis_reports: domain_synthesis_reports.clone(),
+            cross_system_report: cross_system_report.clone(),
+            cross_system_findings: cross_system_findings.clone(),
         },
     });
 
@@ -1104,6 +1188,8 @@ fn plan_audit_jobs(
         kind: StepJobKind::FinalEditor {
             system_report,
             domain_synthesis_reports: domain_synthesis_reports.clone(),
+            cross_system_report,
+            cross_system_findings,
             previous_report,
         },
     });
@@ -1127,7 +1213,8 @@ fn build_lens_review_prompt(
     let practices = read_pack_text(&context.pack.lens_practices(lens))?;
     let evidence = read_pack_text(&context.pack.lens_evidence(lens))?;
     let false_positives = read_pack_text(&context.pack.lens_false_positives(lens))?;
-    let integration = integration_context(&context.pack)?;
+    let integration =
+        integration_context(&context.pack, context.pack_policy.synthesis_integration())?;
     let domain_context = domain_markdown(domain);
     Ok(render_template(
         &template,
@@ -1167,7 +1254,8 @@ fn build_project_optic_review_prompt(
     let practices = read_pack_text(&context.pack.optic_practices(optic))?;
     let evidence = read_pack_text(&context.pack.optic_evidence(optic))?;
     let false_positives = read_pack_text(&context.pack.optic_false_positives(optic))?;
-    let integration = integration_context(&context.pack)?;
+    let integration =
+        integration_context(&context.pack, context.pack_policy.synthesis_integration())?;
     Ok(render_template(
         &template,
         &map_values([
@@ -1198,8 +1286,9 @@ fn build_cross_system_review_prompt(
         "reviewer notes in raw dir",
     );
     let template = read_pack_text(&context.pack.prompt("cross-system-review"))?;
-    let integration = integration_context(&context.pack)?;
-    let cross_system_lenses = cross_system_lenses();
+    let integration =
+        integration_context(&context.pack, context.pack_policy.synthesis_integration())?;
+    let cross_system_lenses = cross_system_lenses(&context.pack_policy);
     Ok(render_template(
         &template,
         &map_values([
@@ -1221,8 +1310,10 @@ fn build_domain_synthesis_prompt(
     planned: &PlannedStep,
     domain: &Domain,
     review_reports: &[PathBuf],
+    review_findings: &[PathBuf],
 ) -> Result<String> {
     let domain_findings = read_paths(review_reports, 40_000)?;
+    let domain_structured_findings = read_paths(review_findings, 40_000)?;
     let domain_context = domain_markdown(domain);
     let output_paths = output_paths(
         &planned.report_path,
@@ -1230,7 +1321,8 @@ fn build_domain_synthesis_prompt(
         "synthesis notes in raw dir",
     );
     let template = read_pack_text(&context.pack.prompt("domain-synthesis"))?;
-    let integration = integration_context(&context.pack)?;
+    let integration =
+        integration_context(&context.pack, context.pack_policy.synthesis_integration())?;
     Ok(render_template(
         &template,
         &map_values([
@@ -1242,6 +1334,7 @@ fn build_domain_synthesis_prompt(
             ("domain_name", &domain.name),
             ("domain_context", &domain_context),
             ("domain_findings", &domain_findings),
+            ("domain_structured_findings", &domain_structured_findings),
             ("integration_context", &integration),
             ("output_paths", &output_paths),
         ]),
@@ -1252,15 +1345,25 @@ fn build_system_synthesis_prompt(
     context: &AuditJobContext,
     planned: &PlannedStep,
     domain_synthesis_reports: &[PathBuf],
+    cross_system_report: &Path,
+    cross_system_findings: &Path,
 ) -> Result<String> {
     let synthesis_inputs = read_paths(domain_synthesis_reports, 80_000)?;
+    let cross_system_inputs = read_paths(
+        &[
+            cross_system_report.to_path_buf(),
+            cross_system_findings.to_path_buf(),
+        ],
+        40_000,
+    )?;
     let output_paths = output_paths(
         &planned.report_path,
         &planned.findings_path,
         "system synthesis notes in raw dir",
     );
     let template = read_pack_text(&context.pack.prompt("system-synthesis"))?;
-    let integration = integration_context(&context.pack)?;
+    let integration =
+        integration_context(&context.pack, context.pack_policy.synthesis_integration())?;
     Ok(render_template(
         &template,
         &map_values([
@@ -1270,6 +1373,7 @@ fn build_system_synthesis_prompt(
             ),
             ("repository_context", context.repository_context.as_str()),
             ("synthesis_inputs", &synthesis_inputs),
+            ("cross_system_inputs", &cross_system_inputs),
             ("integration_context", &integration),
             ("output_paths", &output_paths),
         ]),
@@ -1289,7 +1393,8 @@ fn build_previous_runs_comparison_prompt(
         "comparison notes in raw dir",
     );
     let template = read_pack_text(&context.pack.prompt("previous-runs-comparison"))?;
-    let integration = integration_context(&context.pack)?;
+    let integration =
+        integration_context(&context.pack, context.pack_policy.synthesis_integration())?;
     Ok(render_template(
         &template,
         &map_values([
@@ -1310,12 +1415,22 @@ fn build_final_editor_prompt(
     planned: &PlannedStep,
     system_report: &Path,
     domain_synthesis_reports: &[PathBuf],
+    cross_system_report: &Path,
+    cross_system_findings: &Path,
     previous_report: &Path,
 ) -> Result<String> {
     let mut inputs = String::new();
     inputs.push_str(&read_optional(system_report)?.unwrap_or_default());
     inputs.push_str("\n\n");
     inputs.push_str(&read_paths(domain_synthesis_reports, 100_000)?);
+    inputs.push_str("\n\n# Cross-System Inputs\n\n");
+    inputs.push_str(&read_paths(
+        &[
+            cross_system_report.to_path_buf(),
+            cross_system_findings.to_path_buf(),
+        ],
+        40_000,
+    )?);
     inputs.push_str("\n\n");
     inputs.push_str(&read_optional(previous_report)?.unwrap_or_default());
     let output_paths = output_paths(
@@ -1324,7 +1439,8 @@ fn build_final_editor_prompt(
         "final editor notes in raw dir",
     );
     let template = read_pack_text(&context.pack.prompt("final-editor"))?;
-    let integration = integration_context(&context.pack)?;
+    let integration =
+        integration_context(&context.pack, context.pack_policy.synthesis_integration())?;
     let final_editor_checklist =
         read_pack_text(&context.pack.integration("final-editor-checklist"))?;
     Ok(render_template(
@@ -1387,7 +1503,12 @@ fn run_domain_discovery(
     Ok(())
 }
 
-fn resolve_pack(plan: &AuditPlan, configured_source: Option<&Path>) -> Result<Pack> {
+struct ResolvedPack {
+    pack: Pack,
+    policy: PackPolicy,
+}
+
+fn resolve_pack(plan: &AuditPlan, configured_source: Option<&Path>) -> Result<ResolvedPack> {
     let root = if let Some(configured_source) = configured_source {
         configured_source.to_path_buf()
     } else {
@@ -1419,11 +1540,15 @@ fn resolve_pack(plan: &AuditPlan, configured_source: Option<&Path>) -> Result<Pa
         );
     }
 
-    Ok(Pack {
+    let pack = Pack {
         name: plan.pack_name.clone(),
         version: plan.pack_version.clone(),
         root,
-    })
+    };
+    let policy = read_pack_policy(&pack.root, Some(&plan.pack_version))?;
+    validate_pack_files(&pack, &policy)?;
+
+    Ok(ResolvedPack { pack, policy })
 }
 
 fn resolve_output_dir(
@@ -1459,22 +1584,18 @@ fn selected_pack_version(args: &RunArgs, configured: &Option<String>) -> String 
     }
 }
 
-fn integration_context(pack: &Pack) -> Result<String> {
+fn integration_context(pack: &Pack, integration_files: &[String]) -> Result<String> {
     let mut output = String::new();
-    for name in [
-        "evidence-model",
-        "severity-model",
-        "confidence-model",
-        "deduplication-rules",
-    ] {
+    for name in integration_files {
         output.push_str(&format!("\n\n## {name}\n\n"));
         output.push_str(&read_pack_text(&pack.integration(name))?);
     }
     Ok(output)
 }
 
-fn cross_system_lenses() -> String {
-    Lens::cross_system_default()
+fn cross_system_lenses(pack_policy: &PackPolicy) -> String {
+    pack_policy
+        .cross_system_lenses()
         .iter()
         .map(|lens| lens.as_str())
         .collect::<Vec<_>>()
@@ -1489,23 +1610,26 @@ fn selected_agent(args: &RunArgs, configured: &Option<String>) -> String {
     }
 }
 
-fn selected_lenses(args: &RunArgs) -> Vec<Lens> {
+fn selected_lenses(args: &RunArgs, pack_policy: &PackPolicy) -> Vec<Lens> {
     if !args.lenses.is_empty() {
         args.lenses.clone()
     } else if !args.optics.is_empty() {
         Vec::new()
     } else {
-        args.pack.lenses().to_vec()
+        pack_policy
+            .lenses_for_set(args.pack.as_str())
+            .map(<[Lens]>::to_vec)
+            .unwrap_or_else(|| args.pack.lenses().to_vec())
     }
 }
 
-fn selected_optics(args: &RunArgs, disabled: &[String]) -> Vec<Optic> {
+fn selected_optics(args: &RunArgs, disabled: &[String], pack_policy: &PackPolicy) -> Vec<Optic> {
     let mut optics = if !args.optics.is_empty() {
         args.optics.clone()
     } else if !args.lenses.is_empty() {
         Vec::new()
     } else {
-        Optic::all_default().to_vec()
+        pack_policy.project_optics().to_vec()
     };
 
     optics.retain(|optic| !disabled.iter().any(|disabled| disabled == optic.as_str()));
@@ -1574,6 +1698,129 @@ fn output_paths(report_path: &Path, findings_path: &Path, notes: &str) -> String
     )
 }
 
+fn limit_prompt_chars(prompt: &str, max_chars: usize) -> String {
+    let char_count = prompt.chars().count();
+    if max_chars == 0 || char_count <= max_chars {
+        return prompt.to_owned();
+    }
+
+    let marker = "\n\n[ultraudit prompt truncated to configured character budget]\n\n";
+    let marker_len = marker.chars().count();
+    if max_chars <= marker_len + 2 {
+        return prompt.chars().take(max_chars).collect();
+    }
+
+    let remaining = max_chars - marker_len;
+    let head_len = remaining * 2 / 3;
+    let tail_len = remaining - head_len;
+
+    let mut output = prompt.chars().take(head_len).collect::<String>();
+    output.push_str(marker);
+    let tail = prompt
+        .chars()
+        .skip(char_count - tail_len)
+        .collect::<String>();
+    output.push_str(&tail);
+    output
+}
+
+fn cleanup_stale_step_outputs(request: &AgentRunRequest) -> Result<()> {
+    let paths = [
+        request.report_path.clone(),
+        request.findings_path.clone(),
+        request.notes_path.clone(),
+        request.raw_dir.join("prompt.md"),
+        request.raw_dir.join("stdout.log"),
+        request.raw_dir.join("stderr.log"),
+        request.raw_dir.join("invocation.yaml"),
+        request.raw_dir.join("command.txt"),
+        request.raw_dir.join("exit.json"),
+    ];
+    for path in paths {
+        remove_file_if_exists(&path)?;
+    }
+    Ok(())
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove stale {}", path.display())),
+    }
+}
+
+fn run_artifact_root(raw_dir: &Path) -> Option<PathBuf> {
+    raw_dir
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+}
+
+fn repository_status_snapshot(
+    repository: &Path,
+    artifact_root: Option<&Path>,
+) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .args(["status", "--short"])
+        .current_dir(repository)
+        .output();
+    let Ok(output) = output else {
+        return Ok(None);
+    };
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let status = String::from_utf8_lossy(&output.stdout);
+    let filtered = filter_git_status(&status, repository, artifact_root);
+    Ok(Some(filtered))
+}
+
+fn ensure_repository_unchanged(
+    repository: &Path,
+    artifact_root: Option<&Path>,
+    before: Option<&str>,
+    step_id: &str,
+) -> Result<()> {
+    let Some(before) = before else {
+        return Ok(());
+    };
+    let Some(after) = repository_status_snapshot(repository, artifact_root)? else {
+        return Ok(());
+    };
+    if after == before {
+        return Ok(());
+    }
+
+    bail!(
+        "agent step `{step_id}` modified repository files outside run artifacts; repository reviewer steps must be read-only"
+    )
+}
+
+fn filter_git_status(status: &str, repository: &Path, artifact_root: Option<&Path>) -> String {
+    let allowed_prefix = artifact_root.and_then(|path| {
+        path.strip_prefix(repository)
+            .ok()
+            .map(relative_display_string)
+    });
+
+    status
+        .lines()
+        .filter(|line| {
+            let path = line.get(3..).unwrap_or_default();
+            !allowed_prefix
+                .as_deref()
+                .is_some_and(|prefix| path == prefix || path.starts_with(&format!("{prefix}/")))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn relative_display_string(path: &Path) -> String {
+    path.display().to_string()
+}
+
 fn ensure_step_outputs(record: &AgentStepRecord) -> Result<()> {
     if !record.invocation.notes_path.exists() {
         write_text(
@@ -1601,12 +1848,40 @@ fn ensure_review_report(path: &Path, title: &str) -> Result<()> {
     )
 }
 
-fn ensure_empty_findings(path: &Path) -> Result<()> {
+fn ensure_valid_findings(path: &Path) -> Result<()> {
     if path.exists() {
+        let contents =
+            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        validate_findings_contract(path, &contents)?;
         return Ok(());
     }
 
     write_text(path, "[]\n")
+}
+
+fn validate_findings_contract(path: &Path, contents: &str) -> Result<()> {
+    let trimmed = contents.trim();
+    if trimmed == "[]" || trimmed == r"[]\" {
+        return Ok(());
+    }
+
+    if !(trimmed.starts_with("- ") || trimmed.starts_with('[')) {
+        bail!(
+            "findings file {} must be a YAML/JSON sequence or []",
+            path.display()
+        );
+    }
+
+    for required in ["id", "title", "severity", "confidence", "recommendation"] {
+        if !trimmed.contains(required) {
+            bail!(
+                "findings file {} is missing required finding field `{required}`",
+                path.display()
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn ensure_final_report(
@@ -1636,7 +1911,11 @@ fn ensure_final_report(
         "- prompt pack: `{}` `{}`\n",
         manifest.prompt_pack.name, manifest.prompt_pack.version
     ));
-    output.push_str(&format!("- agent: `{}`\n\n", manifest.agent));
+    output.push_str(&format!("- agent: `{}`\n", manifest.agent));
+    output.push_str(&format!(
+        "- model: `{}`\n\n",
+        manifest.model.as_deref().unwrap_or("auto")
+    ));
     output.push_str("## Reviewed Domains\n\n");
     for domain in domains {
         output.push_str(&format!("- `{}` - {}\n", domain.domain_id, domain.name));
@@ -1695,6 +1974,39 @@ fn previous_run_context(paths: &[PathBuf]) -> Result<String> {
     Ok(truncate_chars(&output, 100_000))
 }
 
+fn prune_old_runs(output_dir: &Path, retention_days: u64) -> Result<()> {
+    if retention_days == 0 || !output_dir.exists() {
+        return Ok(());
+    }
+
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(Duration::from_secs(retention_days.saturating_mul(86_400)));
+    let Some(cutoff) = cutoff else {
+        return Ok(());
+    };
+
+    for entry in
+        fs::read_dir(output_dir).with_context(|| format!("read {}", output_dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("read entry in {}", output_dir.display()))?;
+        let path = entry.path();
+        if !path.is_dir() || !path.join("run.yaml").exists() {
+            continue;
+        }
+
+        let modified = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .with_context(|| format!("metadata {}", path.display()))?;
+        if modified < cutoff {
+            fs::remove_dir_all(&path)
+                .with_context(|| format!("remove expired audit run {}", path.display()))?;
+        }
+    }
+
+    Ok(())
+}
+
 fn map_values<'a>(
     items: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> BTreeMap<&'a str, String> {
@@ -1714,6 +2026,16 @@ source = "{}"
 output_dir = ".audit-runs"
 agent = "codex"
 disabled_optics = []
+
+[artifacts]
+# 0 or absent disables automatic retention cleanup.
+retention_days = 0
+
+[prompt]
+max_chars = 180000
+
+[models]
+codex = "gpt-5.5"
 "#,
         pack_root.display()
     )
@@ -1723,7 +2045,7 @@ fn codex_agent_template() -> &'static str {
     r#"kind = "codex-cli"
 binary = "codex"
 mode = "exec"
-# model = "gpt-5"
+# Agent-local `model = "..."` overrides `.audit/config.toml` [models].
 ignore_user_config = true
 prompt_transport = "stdin"
 approval_policy = "never"

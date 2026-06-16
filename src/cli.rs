@@ -338,6 +338,13 @@ impl Lens {
         }
     }
 
+    pub fn from_id(value: &str) -> Option<Self> {
+        Self::all()
+            .iter()
+            .copied()
+            .find(|lens| lens.as_str() == value)
+    }
+
     pub fn title(self) -> &'static str {
         match self {
             Lens::Architecture => "Architecture",
@@ -369,6 +376,13 @@ impl Optic {
             Optic::DocumentationKnowledge => "documentation-knowledge",
             Optic::NicePractices => "nice-practices",
         }
+    }
+
+    pub fn from_id(value: &str) -> Option<Self> {
+        Self::all_default()
+            .iter()
+            .copied()
+            .find(|optic| optic.as_str() == value)
     }
 
     pub fn title(self) -> &'static str {

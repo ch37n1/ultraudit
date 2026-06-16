@@ -13,6 +13,7 @@ pub struct AuditPlan {
     pub pack_source: PathBuf,
     pub pack: String,
     pub agent: String,
+    pub model: Option<String>,
     pub lenses: Vec<String>,
     pub optics: Vec<String>,
     pub domains: Vec<String>,
@@ -42,6 +43,7 @@ pub struct RunManifest {
     pub config: Option<PathBuf>,
     pub prompt_pack: PromptPackManifest,
     pub agent: String,
+    pub model: Option<String>,
     pub selected_pack: String,
     pub selected_lenses: Vec<String>,
     pub selected_optics: Vec<String>,
@@ -59,6 +61,9 @@ pub struct PromptPackManifest {
     pub version: String,
     pub source: PathBuf,
     pub snapshot: PathBuf,
+    pub content_fingerprint: String,
+    pub file_count: usize,
+    pub byte_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,6 +142,7 @@ pub struct RunSummary {
     pub domains: Vec<String>,
     pub lenses: Vec<String>,
     pub optics: Vec<String>,
+    pub model: Option<String>,
     pub dry_run: bool,
     pub jobs: usize,
     pub retries: u8,

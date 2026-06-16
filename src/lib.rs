@@ -6,6 +6,7 @@ mod model;
 mod orchestrator;
 mod pack;
 mod runner;
+mod toml;
 mod util;
 
 use std::{
@@ -146,6 +147,11 @@ fn print_audit_plan(plan: &AuditPlan, output: &OutputArgs) {
     print_kv("pack name", &plan.pack_name, output);
     print_kv("pack version", &plan.pack_version, output);
     print_kv("pack source", plan.pack_source.display(), output);
+    print_kv(
+        "model",
+        display_option_str(plan.model.as_deref(), "auto"),
+        output,
+    );
     print_kv("lenses", display_list_or(&plan.lenses, "none"), output);
     print_kv("optics", display_list_or(&plan.optics, "none"), output);
     print_kv(
@@ -217,6 +223,10 @@ fn paint(value: &str, style: Style, output: &OutputArgs) -> String {
 fn display_option_path(path: Option<&PathBuf>) -> String {
     path.map(|path| path.display().to_string())
         .unwrap_or_else(|| "auto".to_owned())
+}
+
+fn display_option_str(value: Option<&str>, empty: &str) -> String {
+    value.unwrap_or(empty).to_owned()
 }
 
 fn display_list_or<T: Display>(items: &[T], empty: &str) -> String {

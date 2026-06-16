@@ -4,7 +4,8 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    process::Command as StdCommand,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[test]
@@ -79,9 +80,20 @@ fn run_rejects_retry_counts_above_three() {
 
 #[test]
 fn default_plan_includes_all_lenses() {
+    let workspace = temp_workspace("default-plan");
+    let repo = workspace.join("repo");
+    let prompt_home = workspace.join("home");
+    fs::create_dir_all(&repo).unwrap();
+    install_test_pack(&prompt_home);
+
     let mut cmd = Command::cargo_bin("uat").unwrap();
 
-    cmd.args(["run", "--plan"])
+    cmd.arg("run")
+        .arg("--plan")
+        .arg("--repo")
+        .arg(&repo)
+        .arg("--prompt-home")
+        .arg(&prompt_home)
         .assert()
         .success()
         .stdout(predicate::str::contains("architecture"))
@@ -94,12 +106,15 @@ fn default_plan_includes_all_lenses() {
 #[test]
 fn plan_uses_ultraudit_path_for_prompt_home() {
     let workspace = temp_workspace("env");
+    let repo = workspace.join("repo");
     let prompt_home = workspace.join("for-test");
     let pack_source = prompt_home.join("packs/0.2.0");
+    fs::create_dir_all(&repo).unwrap();
     let mut cmd = Command::cargo_bin("uat").unwrap();
 
     cmd.env("ULTRAUDIT_PATH", &prompt_home)
-        .args(["--format", "json", "run", "--plan"])
+        .args(["--format", "json", "run", "--plan", "--repo"])
+        .arg(&repo)
         .assert()
         .success()
         .stdout(predicate::str::contains(format!(
@@ -145,10 +160,12 @@ fn init_writes_project_config_without_seeding_pack() {
     let config = fs::read_to_string(project_config_dir.join("config.toml")).unwrap();
     assert!(config.contains("version = \"0.2.0\""));
     assert!(config.contains("packs/0.2.0"));
+    assert!(config.contains("[models]"));
+    assert!(config.contains("codex = \"gpt-5.5\""));
     assert!(!config.contains("name = \"ultraudit-default\""));
 
     let codex_config = fs::read_to_string(project_config_dir.join("agents/codex.toml")).unwrap();
-    assert!(codex_config.contains("# model = \"gpt-5\""));
+    assert!(codex_config.contains("overrides `.audit/config.toml`"));
     assert!(codex_config.contains("ignore_user_config = true"));
 }
 
@@ -382,6 +399,45 @@ fn run_retries_failed_agent_step_before_accepting_success() {
 }
 
 #[test]
+fn retry_removes_stale_failed_attempt_artifacts_before_success() {
+    let workspace = temp_workspace("agent-retry-stale");
+    let marker = workspace.join("retry-marker");
+    let command = format!(
+        "if [ ! -f {marker} ]; then touch {marker}; mkdir -p $(dirname {{{{ report_path_sh }}}}) $(dirname {{{{ findings_path_sh }}}}) $(dirname {{{{ notes_path_sh }}}}); printf '# Stale Report\\n\\nold\\n' > {{{{ report_path_sh }}}}; printf '%s\\n' '- id: STALE-001' '  title: Stale failed attempt' '  severity: high' '  confidence: high' '  recommendation: Do not keep this' > {{{{ findings_path_sh }}}}; exit 2; fi; mkdir -p $(dirname {{{{ report_path_sh }}}}) $(dirname {{{{ notes_path_sh }}}}); printf '# Agent Step\\n\\nok\\n' > {{{{ report_path_sh }}}}; printf 'notes\\n' > {{{{ notes_path_sh }}}}",
+        marker = shell_quote(&marker)
+    );
+    let setup = scripted_shell_agent_setup_in_workspace(workspace, "retry-clean", 30, &command);
+
+    let mut cmd = Command::cargo_bin("uat").unwrap();
+    cmd.arg("run")
+        .arg("--repo")
+        .arg(&setup.repo)
+        .arg("--config")
+        .arg(setup.project_config_dir.join("config.toml"))
+        .arg("--prompt-home")
+        .arg(&setup.prompt_home)
+        .arg("--output-dir")
+        .arg(&setup.output_dir)
+        .arg("--agent")
+        .arg("retry-clean")
+        .arg("--lens")
+        .arg("architecture")
+        .arg("--domain")
+        .arg("core")
+        .arg("--jobs")
+        .arg("1")
+        .arg("--retries")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("audit complete"));
+
+    let run_dir = newest_run_dir(&setup.output_dir);
+    let findings = fs::read_to_string(run_dir.join("findings/core.architecture.yaml")).unwrap();
+    assert_eq!(findings, "[]\n");
+}
+
+#[test]
 fn run_fails_when_agent_exits_nonzero() {
     let setup = scripted_shell_agent_setup(
         "agent-nonzero",
@@ -450,6 +506,45 @@ fn run_fails_when_agent_times_out_and_records_exit_metadata() {
     assert_eq!(exit["success"], false);
     assert_eq!(exit["timed_out"], true);
     assert_eq!(exit["error"], "agent timed out after 1 seconds");
+}
+
+#[test]
+fn timeout_terminates_shell_template_child_processes() {
+    let workspace = temp_workspace("agent-timeout-process-group");
+    let marker = workspace.join("leaked-child-output");
+    let command = format!(
+        "(sleep 2; printf leaked > {marker}) & sleep 5",
+        marker = shell_quote(&marker)
+    );
+    let setup = scripted_shell_agent_setup_in_workspace(workspace, "tree-timeout", 1, &command);
+
+    let mut cmd = Command::cargo_bin("uat").unwrap();
+    cmd.arg("run")
+        .arg("--repo")
+        .arg(&setup.repo)
+        .arg("--config")
+        .arg(setup.project_config_dir.join("config.toml"))
+        .arg("--prompt-home")
+        .arg(&setup.prompt_home)
+        .arg("--output-dir")
+        .arg(&setup.output_dir)
+        .arg("--agent")
+        .arg("tree-timeout")
+        .arg("--lens")
+        .arg("architecture")
+        .arg("--domain")
+        .arg("core")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "agent `tree-timeout` failed during step `001-domain-discovery`",
+        ));
+
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        !marker.exists(),
+        "timed-out child process should not outlive its agent step"
+    );
 }
 
 #[test]
@@ -530,6 +625,11 @@ fn codex_cli_agent_uses_current_codex_exec_flags() {
         .success();
     install_test_pack(&prompt_home);
 
+    let config_path = project_config_dir.join("config.toml");
+    let mut config = fs::read_to_string(&config_path).unwrap();
+    config.push_str("fake-codex = \"gpt-5-codex-old\"\n");
+    fs::write(&config_path, config).unwrap();
+
     fs::write(
         project_config_dir.join("agents/fake-codex.toml"),
         format!(
@@ -571,6 +671,102 @@ timeout_seconds = 30
         args,
         "--ask-for-approval\nnever\n--sandbox\nworkspace-write\n--model\ngpt-5-codex\nexec\n--ignore-user-config\n"
     );
+}
+
+#[test]
+fn codex_cli_agent_uses_global_model_config_and_prints_model_metadata() {
+    let workspace = temp_workspace("global-model");
+    let repo = workspace.join("repo");
+    let project_config_dir = repo.join(".audit");
+    let prompt_home = workspace.join("home");
+    let output_dir = workspace.join("runs");
+    let fake_codex = workspace.join("fake-codex");
+    let recorded_args = workspace.join("codex-args.txt");
+
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"sample\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn sample() -> bool { true }\n",
+    )
+    .unwrap();
+    fs::write(
+        &fake_codex,
+        "#!/bin/sh\nscript_dir=$(dirname \"$0\")\nprintf '%s\\n' \"$@\" > \"$script_dir/codex-args.txt\"\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&fake_codex).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_codex, permissions).unwrap();
+
+    let mut init = Command::cargo_bin("uat").unwrap();
+    init.arg("init")
+        .arg("--project-config-dir")
+        .arg(&project_config_dir)
+        .arg("--prompt-home")
+        .arg(&prompt_home)
+        .assert()
+        .success();
+    install_test_pack(&prompt_home);
+
+    let config_path = project_config_dir.join("config.toml");
+    let mut config = fs::read_to_string(&config_path).unwrap();
+    config.push_str("fake-codex = \"gpt-5.5\"\n");
+    fs::write(&config_path, config).unwrap();
+    fs::write(
+        project_config_dir.join("agents/fake-codex.toml"),
+        format!(
+            r#"kind = "codex-cli"
+binary = "{}"
+mode = "exec"
+prompt_transport = "stdin"
+approval_policy = "never"
+sandbox = "workspace-write"
+timeout_seconds = 30
+"#,
+            fake_codex.display()
+        ),
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("uat").unwrap();
+    let output = cmd
+        .arg("run")
+        .arg("--repo")
+        .arg(&repo)
+        .arg("--config")
+        .arg(project_config_dir.join("config.toml"))
+        .arg("--prompt-home")
+        .arg(&prompt_home)
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .arg("--agent")
+        .arg("fake-codex")
+        .arg("--lens")
+        .arg("architecture")
+        .arg("--domain")
+        .arg("core")
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr:\n{stderr}");
+    assert!(stdout.contains("model: gpt-5.5"));
+
+    let args = fs::read_to_string(recorded_args).unwrap();
+    assert_eq!(
+        args,
+        "--ask-for-approval\nnever\n--sandbox\nworkspace-write\n--model\ngpt-5.5\nexec\n--ignore-user-config\n"
+    );
+
+    let run_dir = newest_run_dir(&output_dir);
+    let manifest = fs::read_to_string(run_dir.join("run.yaml")).unwrap();
+    assert!(manifest.contains("\"model\": \"gpt-5.5\""));
 }
 
 #[test]
@@ -746,6 +942,76 @@ fn default_flow_runs_project_optics_once_and_excludes_code_quality_from_cross_sy
 }
 
 #[test]
+fn cross_system_outputs_feed_system_synthesis_and_final_editor() {
+    let command = "mkdir -p $(dirname {{ report_path_sh }}) $(dirname {{ findings_path_sh }}) $(dirname {{ notes_path_sh }}); if printf '%s' {{ step_id }} | grep -q cross-system; then printf '# Cross System\\n\\nCROSS_UNIQUE_MARKER\\n' > {{ report_path_sh }}; printf '%s\\n' '- id: CROSS-UNIQUE-001' '  title: Cross unique marker' '  severity: medium' '  confidence: high' '  recommendation: Preserve cross-system input' > {{ findings_path_sh }}; else printf '# Agent Step\\n\\nok\\n' > {{ report_path_sh }}; printf '[]\\n' > {{ findings_path_sh }}; fi; printf 'notes\\n' > {{ notes_path_sh }}";
+    let setup = scripted_shell_agent_setup("cross-system-flow", "cross-aware", 30, command);
+
+    let mut cmd = Command::cargo_bin("uat").unwrap();
+    cmd.arg("run")
+        .arg("--repo")
+        .arg(&setup.repo)
+        .arg("--config")
+        .arg(setup.project_config_dir.join("config.toml"))
+        .arg("--prompt-home")
+        .arg(&setup.prompt_home)
+        .arg("--output-dir")
+        .arg(&setup.output_dir)
+        .arg("--agent")
+        .arg("cross-aware")
+        .arg("--lens")
+        .arg("architecture")
+        .arg("--domain")
+        .arg("core")
+        .arg("--jobs")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("audit complete"));
+
+    let run_dir = newest_run_dir(&setup.output_dir);
+    let system_prompt =
+        fs::read_to_string(run_dir.join("raw/005-system-synthesis/prompt.md")).unwrap();
+    let final_prompt = fs::read_to_string(run_dir.join("raw/007-final-editor/prompt.md")).unwrap();
+    assert!(system_prompt.contains("CROSS_UNIQUE_MARKER"));
+    assert!(system_prompt.contains("CROSS-UNIQUE-001"));
+    assert!(final_prompt.contains("CROSS_UNIQUE_MARKER"));
+    assert!(final_prompt.contains("CROSS-UNIQUE-001"));
+}
+
+#[test]
+fn agent_step_fails_when_it_mutates_git_repo_outside_run_artifacts() {
+    let setup = scripted_shell_agent_setup(
+        "repo-mutation",
+        "mutating",
+        30,
+        "printf 'pub fn sample() -> bool { false }\\n' > src/lib.rs; mkdir -p $(dirname {{ report_path_sh }}) $(dirname {{ findings_path_sh }}) $(dirname {{ notes_path_sh }}); printf '# Agent Step\\n\\nok\\n' > {{ report_path_sh }}; printf '[]\\n' > {{ findings_path_sh }}; printf 'notes\\n' > {{ notes_path_sh }}",
+    );
+    init_git_repo(&setup.repo);
+
+    let mut cmd = Command::cargo_bin("uat").unwrap();
+    cmd.arg("run")
+        .arg("--repo")
+        .arg(&setup.repo)
+        .arg("--config")
+        .arg(setup.project_config_dir.join("config.toml"))
+        .arg("--prompt-home")
+        .arg(&setup.prompt_home)
+        .arg("--output-dir")
+        .arg(&setup.output_dir)
+        .arg("--agent")
+        .arg("mutating")
+        .arg("--lens")
+        .arg("architecture")
+        .arg("--domain")
+        .arg("core")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "modified repository files outside run artifacts",
+        ));
+}
+
+#[test]
 fn makefile_install_target_installs_binary_pack_and_checks_codex() {
     let makefile = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Makefile"))
         .expect("Makefile should exist");
@@ -858,6 +1124,28 @@ fn toml_string(value: &str) -> String {
 
 fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+}
+
+fn init_git_repo(repo: &Path) {
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.email", "ultraudit@example.test"]);
+    run_git(repo, &["config", "user.name", "Ultraudit Test"]);
+    run_git(repo, &["add", "."]);
+    run_git(repo, &["commit", "-m", "initial"]);
+}
+
+fn run_git(repo: &Path, args: &[&str]) {
+    let output = StdCommand::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .unwrap_or_else(|error| panic!("git {args:?} should start: {error}"));
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn read_exit_json(run_dir: &Path) -> serde_json::Value {

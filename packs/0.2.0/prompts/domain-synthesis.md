@@ -21,6 +21,10 @@ Merge findings across reviews for this domain. Do not run a new broad review. Fo
 
 {{ domain_findings }}
 
+## Structured Findings Inputs
+
+{{ domain_structured_findings }}
+
 ## Output Paths
 
 ```text
