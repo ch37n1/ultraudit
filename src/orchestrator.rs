@@ -1,7 +1,11 @@
 use std::{
     collections::BTreeMap,
     fs,
+    io::{self, Write},
     path::{Path, PathBuf},
+    sync::mpsc::{self, RecvTimeoutError, Sender},
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 use anyhow::{bail, Context, Result};
@@ -18,12 +22,25 @@ use crate::{
         RunSummary,
     },
     pack::{legacy_pack_root, pack_root, read_pack_text, render_template, snapshot_pack, Pack},
-    runner::{run_agent, run_agent_dry_run, AgentRunRequest},
+    runner::{run_agent, run_agent_dry_run, AgentRunOptions, AgentRunRequest},
     util::{
         copy_dir_recursive, now_run_id, read_optional, resolve_path, sanitize_id, truncate_chars,
         write_json_yaml, write_text, write_text_if_absent,
     },
 };
+
+#[derive(Debug, Clone, Copy)]
+pub struct AuditExecutionOptions {
+    pub progress: ProgressDisplay,
+    pub verbose_agent_output: bool,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ProgressDisplay {
+    Hidden,
+    Lines,
+    Spinner,
+}
 
 pub fn build_audit_plan(args: &RunArgs) -> Result<AuditPlan> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
@@ -112,7 +129,7 @@ pub fn init_project(args: &crate::cli::InitArgs) -> Result<InitPlan> {
     })
 }
 
-pub fn execute_audit(args: &RunArgs) -> Result<RunSummary> {
+pub fn execute_audit(args: &RunArgs, options: AuditExecutionOptions) -> Result<RunSummary> {
     let plan = build_audit_plan(args)?;
     if plan.lenses.is_empty() && plan.optics.is_empty() {
         bail!("no lenses or optics selected");
@@ -157,6 +174,8 @@ pub fn execute_audit(args: &RunArgs) -> Result<RunSummary> {
     let repository_context = repository_markdown(&repository);
     let domains = infer_domains(&repository, &plan.domains);
     let domain_map_context = domain_map_markdown(&domains);
+    let selected_lenses = lenses_from_ids(&plan.lenses);
+    let selected_optics = optics_from_ids(&plan.optics);
 
     let mode = if plan.dry_run {
         RunnerMode::DryRun {
@@ -174,6 +193,11 @@ pub fn execute_audit(args: &RunArgs) -> Result<RunSummary> {
         repository: plan.repository.clone(),
         run_dir: run_dir.clone(),
         allow_failure: plan.allow_agent_failures,
+        progress: RunProgress {
+            display: options.progress,
+            total: total_step_count(&domains, &selected_lenses, &selected_optics),
+        },
+        verbose_agent_output: options.verbose_agent_output,
         counter: 0,
         steps: Vec::new(),
     };
@@ -188,8 +212,6 @@ pub fn execute_audit(args: &RunArgs) -> Result<RunSummary> {
         &domains,
     )?;
 
-    let selected_lenses = lenses_from_ids(&plan.lenses);
-    let selected_optics = optics_from_ids(&plan.optics);
     let mut domain_review_reports = BTreeMap::<String, Vec<PathBuf>>::new();
     let mut all_findings = Vec::new();
 
@@ -310,6 +332,8 @@ struct StepRunner {
     repository: PathBuf,
     run_dir: PathBuf,
     allow_failure: bool,
+    progress: RunProgress,
+    verbose_agent_output: bool,
     counter: usize,
     steps: Vec<AgentStepRecord>,
 }
@@ -343,13 +367,156 @@ impl StepRunner {
             notes_path,
             allow_failure: self.allow_failure,
         };
+        let activity = self
+            .progress
+            .step_started(self.counter, &request.step_id, role);
         let record = match &self.mode {
-            RunnerMode::Real(agent) => run_agent(agent, &request)?,
-            RunnerMode::DryRun { agent_name } => run_agent_dry_run(agent_name, &request)?,
+            RunnerMode::Real(agent) => run_agent(
+                agent,
+                &request,
+                AgentRunOptions {
+                    live_output: self.verbose_agent_output,
+                },
+            ),
+            RunnerMode::DryRun { agent_name } => run_agent_dry_run(agent_name, &request),
         };
-        ensure_step_outputs(&record)?;
+        let record = match record {
+            Ok(record) => record,
+            Err(error) => {
+                activity.finish(false);
+                return Err(error);
+            }
+        };
+        let output_result = ensure_step_outputs(&record);
+        activity.finish(record.exit.success && output_result.is_ok());
+        output_result?;
         self.steps.push(record.clone());
         Ok(record)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RunProgress {
+    display: ProgressDisplay,
+    total: usize,
+}
+
+impl RunProgress {
+    fn step_started(self, current: usize, step_id: &str, role: &str) -> StepActivity {
+        let activity = StepActivity {
+            display: self.display,
+            current,
+            total: self.total,
+            step_id: step_id.to_owned(),
+            role: role.to_owned(),
+            started: Instant::now(),
+            spinner: None,
+        };
+
+        match self.display {
+            ProgressDisplay::Hidden => activity,
+            ProgressDisplay::Lines => {
+                anstream::eprintln!("start [{}/{}] {} ({})", current, self.total, role, step_id);
+                activity
+            }
+            ProgressDisplay::Spinner => activity.with_spinner(),
+        }
+    }
+}
+
+struct StepActivity {
+    display: ProgressDisplay,
+    current: usize,
+    total: usize,
+    step_id: String,
+    role: String,
+    started: Instant,
+    spinner: Option<SpinnerThread>,
+}
+
+impl StepActivity {
+    fn with_spinner(mut self) -> Self {
+        let (stop, receiver) = mpsc::channel();
+        let current = self.current;
+        let total = self.total;
+        let step_id = self.step_id.clone();
+        let role = self.role.clone();
+        let started = self.started;
+        let handle = thread::spawn(move || {
+            let frames = ["-", "\\", "|", "/"];
+            let mut frame = 0;
+
+            loop {
+                match receiver.recv_timeout(Duration::from_millis(250)) {
+                    Ok(success) => {
+                        let status = if success { "done" } else { "failed" };
+                        anstream::eprint!(
+                            "\r\x1b[2K{status} [{current}/{total}] {role} ({step_id}) in {}\n",
+                            format_duration(started.elapsed())
+                        );
+                        let _ = io::stderr().flush();
+                        break;
+                    }
+                    Err(RecvTimeoutError::Timeout) => {
+                        anstream::eprint!(
+                            "\r{} [{}/{}] {} ({}) running {}",
+                            frames[frame % frames.len()],
+                            current,
+                            total,
+                            role,
+                            step_id,
+                            format_duration(started.elapsed())
+                        );
+                        let _ = io::stderr().flush();
+                        frame += 1;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        });
+
+        self.spinner = Some(SpinnerThread { stop, handle });
+        self
+    }
+
+    fn finish(mut self, success: bool) {
+        if let Some(spinner) = self.spinner.take() {
+            spinner.finish(success);
+            return;
+        }
+
+        if matches!(self.display, ProgressDisplay::Lines) {
+            let status = if success { "done" } else { "failed" };
+            anstream::eprintln!(
+                "{status} [{}/{}] {} ({}) in {}",
+                self.current,
+                self.total,
+                self.role,
+                self.step_id,
+                format_duration(self.started.elapsed())
+            );
+        }
+    }
+}
+
+struct SpinnerThread {
+    stop: Sender<bool>,
+    handle: JoinHandle<()>,
+}
+
+impl SpinnerThread {
+    fn finish(self, success: bool) {
+        let _ = self.stop.send(success);
+        let _ = self.handle.join();
+    }
+}
+
+fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds >= 60 {
+        format!("{}m{:02}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{}.{:01}s", seconds, duration.subsec_millis() / 100)
     }
 }
 
@@ -857,6 +1024,10 @@ fn selected_previous_runs(args: &RunArgs, output_dir: &Path) -> Result<Vec<PathB
     runs.sort();
     let keep_from = runs.len().saturating_sub(3);
     Ok(runs.split_off(keep_from))
+}
+
+fn total_step_count(domains: &[Domain], lenses: &[Lens], optics: &[Optic]) -> usize {
+    1 + (domains.len() * lenses.len()) + optics.len() + 1 + domains.len() + 1 + 1 + 1
 }
 
 fn lenses_from_ids(ids: &[String]) -> Vec<Lens> {

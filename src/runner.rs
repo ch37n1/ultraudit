@@ -1,9 +1,11 @@
 use std::{
     collections::BTreeMap,
     fs::File,
-    io::Write,
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{Arc, Mutex},
+    thread::{self, JoinHandle},
     time::Instant,
 };
 
@@ -30,7 +32,16 @@ pub struct AgentRunRequest {
     pub allow_failure: bool,
 }
 
-pub fn run_agent(config: &AgentConfig, request: &AgentRunRequest) -> Result<AgentStepRecord> {
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AgentRunOptions {
+    pub live_output: bool,
+}
+
+pub fn run_agent(
+    config: &AgentConfig,
+    request: &AgentRunRequest,
+    options: AgentRunOptions,
+) -> Result<AgentStepRecord> {
     std::fs::create_dir_all(&request.raw_dir)
         .with_context(|| format!("create {}", request.raw_dir.display()))?;
 
@@ -48,17 +59,23 @@ pub fn run_agent(config: &AgentConfig, request: &AgentRunRequest) -> Result<Agen
     write_json_yaml(&invocation_path, &built)?;
 
     let started = Instant::now();
-    let stdout =
+    let stdout_file =
         File::create(&stdout_path).with_context(|| format!("create {}", stdout_path.display()))?;
-    let stderr =
+    let stderr_file =
         File::create(&stderr_path).with_context(|| format!("create {}", stderr_path.display()))?;
 
     let mut command = Command::new(&built.program);
-    command
-        .args(&built.args)
-        .current_dir(&built.cwd)
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr));
+    command.args(&built.args).current_dir(&built.cwd);
+
+    let output_files = if options.live_output {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        Some((stdout_file, stderr_file))
+    } else {
+        command
+            .stdout(Stdio::from(stdout_file))
+            .stderr(Stdio::from(stderr_file));
+        None
+    };
 
     for (key, value) in &config.env {
         command.env(key, value);
@@ -71,6 +88,7 @@ pub fn run_agent(config: &AgentConfig, request: &AgentRunRequest) -> Result<Agen
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
+            drop(output_files);
             let exit = AgentExit {
                 success: false,
                 exit_code: None,
@@ -90,6 +108,24 @@ pub fn run_agent(config: &AgentConfig, request: &AgentRunRequest) -> Result<Agen
                 Err(anyhow!("failed to start agent `{}`: {error}", config.name))
             };
         }
+    };
+
+    let output_threads = if let Some((stdout_file, stderr_file)) = output_files {
+        let live_lock = Arc::new(Mutex::new(()));
+        let mut threads = Vec::new();
+        if let Some(stdout) = child.stdout.take() {
+            threads.push(spawn_output_tee(
+                stdout,
+                stdout_file,
+                Arc::clone(&live_lock),
+            ));
+        }
+        if let Some(stderr) = child.stderr.take() {
+            threads.push(spawn_output_tee(stderr, stderr_file, live_lock));
+        }
+        threads
+    } else {
+        Vec::new()
     };
 
     if matches!(config.prompt_transport, PromptTransport::Stdin) {
@@ -131,6 +167,7 @@ pub fn run_agent(config: &AgentConfig, request: &AgentRunRequest) -> Result<Agen
             )),
         )
     };
+    let output_result = join_output_threads(output_threads);
 
     let exit = AgentExit {
         success,
@@ -140,6 +177,7 @@ pub fn run_agent(config: &AgentConfig, request: &AgentRunRequest) -> Result<Agen
         error,
     };
     write_json_yaml(&exit_path, &exit)?;
+    output_result?;
 
     let record = AgentStepRecord {
         invocation: built,
@@ -156,6 +194,48 @@ pub fn run_agent(config: &AgentConfig, request: &AgentRunRequest) -> Result<Agen
             request.raw_dir.display()
         ))
     }
+}
+
+fn spawn_output_tee<R>(
+    mut reader: R,
+    mut file: File,
+    live_lock: Arc<Mutex<()>>,
+) -> JoinHandle<Result<()>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let read = reader.read(&mut buffer).context("read agent output")?;
+            if read == 0 {
+                break;
+            }
+
+            let chunk = &buffer[..read];
+            file.write_all(chunk).context("write agent output log")?;
+            write_live_agent_output(chunk, &live_lock);
+        }
+        file.flush().context("flush agent output log")
+    })
+}
+
+fn join_output_threads(threads: Vec<JoinHandle<Result<()>>>) -> Result<()> {
+    for thread in threads {
+        thread
+            .join()
+            .map_err(|_| anyhow!("agent output tee thread panicked"))??;
+    }
+    Ok(())
+}
+
+fn write_live_agent_output(chunk: &[u8], live_lock: &Arc<Mutex<()>>) {
+    let Ok(_guard) = live_lock.lock() else {
+        return;
+    };
+    let mut stderr = io::stderr().lock();
+    let _ = stderr.write_all(chunk);
+    let _ = stderr.flush();
 }
 
 pub fn run_agent_dry_run(agent_name: &str, request: &AgentRunRequest) -> Result<AgentStepRecord> {

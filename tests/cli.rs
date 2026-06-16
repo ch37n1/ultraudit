@@ -202,6 +202,117 @@ command = "mkdir -p $(dirname {{ report_path_sh }}) $(dirname {{ findings_path_s
 }
 
 #[test]
+fn run_prints_step_progress_without_agent_output_by_default() {
+    let setup = noisy_shell_agent_setup("quiet-progress");
+
+    let mut cmd = Command::cargo_bin("uat").unwrap();
+    let output = cmd
+        .arg("run")
+        .arg("--repo")
+        .arg(&setup.repo)
+        .arg("--config")
+        .arg(setup.project_config_dir.join("config.toml"))
+        .arg("--prompt-home")
+        .arg(&setup.prompt_home)
+        .arg("--output-dir")
+        .arg(&setup.output_dir)
+        .arg("--agent")
+        .arg("noisy")
+        .arg("--lens")
+        .arg("architecture")
+        .arg("--domain")
+        .arg("core")
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr:\n{stderr}");
+    assert!(stdout.contains("audit complete"));
+    assert!(stderr.contains("start [1/7] domain discovery"));
+    assert!(stderr.contains("done [7/7] final editorial verification"));
+    assert!(!stderr.contains("agent stdout marker"));
+    assert!(!stderr.contains("agent stderr marker"));
+
+    let run_dir = newest_run_dir(&setup.output_dir);
+    let raw_stdout = fs::read_to_string(run_dir.join("raw/001-domain-discovery/stdout.log"))
+        .expect("agent stdout should still be logged");
+    assert!(raw_stdout.contains("agent stdout marker"));
+}
+
+#[test]
+fn verbose_run_streams_agent_output_to_stderr() {
+    let setup = noisy_shell_agent_setup("verbose-output");
+
+    let mut cmd = Command::cargo_bin("uat").unwrap();
+    let output = cmd
+        .arg("-v")
+        .arg("run")
+        .arg("--repo")
+        .arg(&setup.repo)
+        .arg("--config")
+        .arg(setup.project_config_dir.join("config.toml"))
+        .arg("--prompt-home")
+        .arg(&setup.prompt_home)
+        .arg("--output-dir")
+        .arg(&setup.output_dir)
+        .arg("--agent")
+        .arg("noisy")
+        .arg("--lens")
+        .arg("architecture")
+        .arg("--domain")
+        .arg("core")
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr:\n{stderr}");
+    assert!(stdout.contains("audit complete"));
+    assert!(stderr.contains("start [1/7] domain discovery"));
+    assert!(stderr.contains("agent stdout marker"));
+    assert!(stderr.contains("agent stderr marker"));
+}
+
+#[test]
+fn json_run_keeps_stdout_machine_readable_and_hides_progress() {
+    let setup = noisy_shell_agent_setup("json-output");
+
+    let mut cmd = Command::cargo_bin("uat").unwrap();
+    let output = cmd
+        .arg("--format")
+        .arg("json")
+        .arg("run")
+        .arg("--repo")
+        .arg(&setup.repo)
+        .arg("--config")
+        .arg(setup.project_config_dir.join("config.toml"))
+        .arg("--prompt-home")
+        .arg(&setup.prompt_home)
+        .arg("--output-dir")
+        .arg(&setup.output_dir)
+        .arg("--agent")
+        .arg("noisy")
+        .arg("--lens")
+        .arg("architecture")
+        .arg("--domain")
+        .arg("core")
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr:\n{stderr}");
+    let summary: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON");
+    assert_eq!(summary["dry_run"], false);
+    assert!(!stdout.contains("start ["));
+    assert!(!stdout.contains("agent stdout marker"));
+    assert!(!stderr.contains("start ["));
+    assert!(!stderr.contains("agent stdout marker"));
+}
+
+#[test]
 fn codex_cli_agent_uses_current_codex_exec_flags() {
     let workspace = temp_workspace("codex-flags");
     let repo = workspace.join("repo");
@@ -475,6 +586,61 @@ fn temp_workspace(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("ultraudit-{name}-{}-{nanos}", std::process::id()));
     fs::create_dir_all(&path).unwrap();
     path
+}
+
+struct ShellAgentSetup {
+    repo: PathBuf,
+    project_config_dir: PathBuf,
+    prompt_home: PathBuf,
+    output_dir: PathBuf,
+}
+
+fn noisy_shell_agent_setup(name: &str) -> ShellAgentSetup {
+    let workspace = temp_workspace(name);
+    let repo = workspace.join("repo");
+    let project_config_dir = repo.join(".audit");
+    let prompt_home = workspace.join("home");
+    let output_dir = workspace.join("runs");
+
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"sample\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn sample() -> bool { true }\n",
+    )
+    .unwrap();
+
+    let mut init = Command::cargo_bin("uat").unwrap();
+    init.arg("init")
+        .arg("--project-config-dir")
+        .arg(&project_config_dir)
+        .arg("--prompt-home")
+        .arg(&prompt_home)
+        .assert()
+        .success();
+    install_test_pack(&prompt_home);
+
+    fs::write(
+        project_config_dir.join("agents/noisy.toml"),
+        r#"kind = "shell-template"
+shell = "sh"
+prompt_transport = "stdin"
+timeout_seconds = 30
+command = "printf 'agent %s marker\n' stdout; printf 'agent %s marker\n' stderr >&2; mkdir -p $(dirname {{ report_path_sh }}) $(dirname {{ findings_path_sh }}) $(dirname {{ notes_path_sh }}); printf '# Agent Step\n\nok\n' > {{ report_path_sh }}; printf '[]\n' > {{ findings_path_sh }}; printf 'notes\n' > {{ notes_path_sh }}"
+"#,
+    )
+    .unwrap();
+
+    ShellAgentSetup {
+        repo,
+        project_config_dir,
+        prompt_home,
+        output_dir,
+    }
 }
 
 fn newest_run_dir(output_dir: &PathBuf) -> PathBuf {

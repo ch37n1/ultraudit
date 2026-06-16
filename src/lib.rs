@@ -83,7 +83,7 @@ fn run_audit(args: RunArgs, output: &OutputArgs) -> Result<()> {
         }
     }
 
-    let summary = orchestrator::execute_audit(&args)?;
+    let summary = orchestrator::execute_audit(&args, audit_execution_options(output))?;
     if matches!(output.format, OutputFormat::Json) {
         anstream::println!("{}", serde_json::to_string_pretty(&summary)?);
     } else {
@@ -91,6 +91,21 @@ fn run_audit(args: RunArgs, output: &OutputArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn audit_execution_options(output: &OutputArgs) -> orchestrator::AuditExecutionOptions {
+    let progress = if matches!(output.format, OutputFormat::Json) {
+        orchestrator::ProgressDisplay::Hidden
+    } else if output.verbose > 0 || !io::stderr().is_terminal() {
+        orchestrator::ProgressDisplay::Lines
+    } else {
+        orchestrator::ProgressDisplay::Spinner
+    };
+
+    orchestrator::AuditExecutionOptions {
+        progress,
+        verbose_agent_output: output.verbose > 0,
+    }
 }
 
 fn init_project(args: InitArgs, output: &OutputArgs) -> Result<()> {
